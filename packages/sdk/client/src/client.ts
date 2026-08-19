@@ -13,12 +13,33 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
+import type { ImageAttachmentLimits, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import {
   JsonRpcLineTransport,
   JsonRpcResponseError,
+  type AgentPresetsListResult,
+  type CommandExecuteResult,
+  type CommandListResult,
   type InitializeParams,
   type InitializeResult,
+  type InteractionRespondParams,
+  type InteractionRespondResult,
+  type ModelCatalogResult,
+  type ProviderAuthCancelResult,
+  type ProviderAuthInfoResult,
+  type ProviderAuthLogoutResult,
+  type ProviderAuthRespondResult,
+  type ProviderAuthStartResult,
+  type SessionHistoryResult,
+  type SessionListResult,
   type SessionPromptParams,
+  type SessionResumeResult,
+  type SessionSelectModelResult,
+  type SettingsGetResult,
+  type SettingsNamespaceWire,
+  type SettingsSetParams,
+  type SettingsSetResult,
+  type SkillsListResult,
 } from '@deepseek-ai/dsh-sdk-protocol'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { disposeRuntimeProcess } from './dispose.ts'
@@ -255,7 +276,14 @@ export class HarnessClient {
       this.transport?.close()
     })
     const transport = new JsonRpcLineTransport(child.stdout, child.stdin)
-    transport.onNotification((method, params) => { this.dispatchNotification({ method, params }) })
+    transport.onNotification((method, params) => {
+      const notification = { method, params }
+      if (!validProviderAuthNotification(notification)) {
+        this.failSubscriptions(new SdkProtocolError(`malformed ${method} notification`))
+        return
+      }
+      this.dispatchNotification(notification)
+    })
     transport.start()
     this.transport = transport
   }
@@ -272,6 +300,335 @@ export class HarnessClient {
       throw new SdkProtocolError(`initialize returned no server identity: ${JSON.stringify(result)}`)
     }
     return { serverInfo: { name: result.serverInfo.name, version: result.serverInfo.version } }
+  }
+
+  /**
+   * List registered provider/model routes, preserving independent lookup failures.
+   * @returns healthy provider catalogs plus per-provider failures.
+   */
+  async catalog(): Promise<ModelCatalogResult> {
+    const result = await this.request('llm/catalog')
+    if (!isRecord(result) || !Array.isArray(result.providers) || !Array.isArray(result.failures)
+      || !result.providers.every(validProviderCatalog) || !result.failures.every(validCatalogFailure)) {
+      throw new SdkProtocolError(`llm/catalog returned malformed catalog: ${JSON.stringify(result)}`)
+    }
+    return result as unknown as ModelCatalogResult
+  }
+
+  /**
+   * Read non-secret native authentication methods and status for one provider.
+   * @param provider - registered provider route.
+   * @returns method labels and configured state without credential values.
+   */
+  async providerAuthInfo(provider: string): Promise<ProviderAuthInfoResult> {
+    const result = await this.request('provider/authInfo', { provider })
+    if (!validProviderAuthInfo(result) || result.provider !== provider) {
+      throw new SdkProtocolError(`provider/authInfo returned malformed info: ${JSON.stringify(result)}`)
+    }
+    return result
+  }
+
+  /**
+   * Start one asynchronous provider-native authentication flow.
+   * @param provider - registered provider route.
+   * @param type - provider-offered authentication method.
+   * @returns opaque flow identity used to correlate notifications.
+   */
+  async startProviderAuth(provider: string, type: 'api_key' | 'oauth'): Promise<ProviderAuthStartResult> {
+    const result = await this.request('provider/authStart', { provider, type })
+    if (!isRecord(result) || !exactKeys(result, ['flowId'])
+      || typeof result.flowId !== 'string' || result.flowId.length === 0) {
+      throw new SdkProtocolError(`provider/authStart returned malformed flow: ${JSON.stringify(result)}`)
+    }
+    return { flowId: result.flowId }
+  }
+
+  /**
+   * Respond to one pending provider auth prompt.
+   * @param flowId - owning authentication flow.
+   * @param promptId - exact pending prompt.
+   * @param value - user response, sent only in this request.
+   * @returns first-response-wins receipt.
+   */
+  async respondProviderAuth(flowId: string, promptId: string, value: string): Promise<ProviderAuthRespondResult> {
+    const result = await this.request('provider/authRespond', { flowId, promptId, value })
+    const valid = isRecord(result) && (
+      (exactKeys(result, ['accepted']) && result.accepted === true)
+      || (exactKeys(result, ['accepted', 'reason']) && result.accepted === false
+        && (result.reason === 'not-pending' || result.reason === 'bad-flow'))
+    )
+    if (!valid) {
+      throw new SdkProtocolError(`provider/authRespond returned malformed receipt: ${JSON.stringify(result)}`)
+    }
+    return result as unknown as ProviderAuthRespondResult
+  }
+
+  /**
+   * Cancel one provider authentication flow.
+   * @param flowId - flow to abort.
+   * @returns whether an active flow received cancellation.
+   */
+  async cancelProviderAuth(flowId: string): Promise<ProviderAuthCancelResult> {
+    const result = await this.request('provider/authCancel', { flowId })
+    if (!isRecord(result) || !exactKeys(result, ['requested']) || typeof result.requested !== 'boolean') {
+      throw new SdkProtocolError(`provider/authCancel returned malformed result: ${JSON.stringify(result)}`)
+    }
+    return { requested: result.requested }
+  }
+
+  /**
+   * Remove one provider's stored native credential.
+   * @param provider - registered provider route to disconnect.
+   * @returns confirmed disconnect result.
+   */
+  async logoutProvider(provider: string): Promise<ProviderAuthLogoutResult> {
+    const result = await this.request('provider/authLogout', { provider })
+    if (!isRecord(result) || !exactKeys(result, ['disconnected']) || result.disconnected !== true) {
+      throw new SdkProtocolError(`provider/authLogout returned malformed result: ${JSON.stringify(result)}`)
+    }
+    return { disconnected: true }
+  }
+
+  /**
+   * Query deployment-resolved image upload limits.
+   * @returns active attachment admission policy.
+   */
+  async imageLimits(): Promise<ImageAttachmentLimits> {
+    const result = await this.request('attachment/imageLimits')
+    if (!validImageLimits(result)) {
+      throw new SdkProtocolError(`attachment/imageLimits returned malformed limits: ${JSON.stringify(result)}`)
+    }
+    return result
+  }
+
+  /**
+   * Save one image as a durable attachment.
+   * @param data - encoded image bytes.
+   * @param mediaType - declared media type, verified by the runtime.
+   * @param name - optional display name.
+   * @returns verified durable image reference.
+   */
+  async saveImage(data: Uint8Array, mediaType: ImageMediaType, name?: string): Promise<ImageAttachmentRef> {
+    const result = await this.request('attachment/saveImage', {
+      data: Buffer.from(data).toString('base64'),
+      mediaType,
+      ...name === undefined ? {} : { name },
+    })
+    if (!validImageRef(result) || result.bytes !== data.byteLength || result.mediaType !== mediaType) {
+      throw new SdkProtocolError(`attachment/saveImage returned malformed or mismatched reference: ${JSON.stringify(result)}`)
+    }
+    return result
+  }
+
+  /**
+   * List all logical sessions visible to the runtime query service.
+   * @returns live-preferred durable session records.
+   */
+  async listSessions(): Promise<SessionListResult> {
+    const result = await this.request('session/list')
+    if (!isRecord(result) || !Array.isArray(result.sessions) || !result.sessions.every(validSessionListEntry)) {
+      throw new SdkProtocolError(`session/list returned malformed records: ${JSON.stringify(result)}`)
+    }
+    return result as unknown as SessionListResult
+  }
+
+  /**
+   * Read one complete durable session log without making it live.
+   * @param sessionId - logical session identity.
+   * @returns detached header and complete event log.
+   */
+  async sessionHistory(sessionId: string): Promise<SessionHistoryResult> {
+    const result = await this.request('session/history', { sessionId })
+    if (!isRecord(result) || !validSessionHeader(result.session) || result.session.id !== sessionId
+      || !Array.isArray(result.events) || !validSessionEventLog(result.events)) {
+      throw new SdkProtocolError(`session/history returned malformed history: ${JSON.stringify(result)}`)
+    }
+    return result as unknown as SessionHistoryResult
+  }
+
+  /**
+   * Explicitly resume one persisted session.
+   * @param sessionId - persisted session identity.
+   * @returns resumed identity.
+   */
+  async resumeSession(sessionId: string): Promise<SessionResumeResult> {
+    const result = await this.request('session/resume', { sessionId })
+    if (!isRecord(result) || result.sessionId !== sessionId) {
+      throw new SdkProtocolError(`session/resume returned malformed identity: ${JSON.stringify(result)}`)
+    }
+    return { sessionId }
+  }
+
+  /**
+   * Answer one pending approval request.
+   * @param requestId - stable pending interaction id.
+   * @param outcome - one-shot grant or rejection.
+   * @returns first-response-wins receipt.
+   */
+  respondApproval(requestId: string, outcome: 'allowed-once' | 'rejected'): Promise<InteractionRespondResult> {
+    return this.respondInteraction({ requestId, kind: 'approval', outcome })
+  }
+
+  /**
+   * Answer one pending user-question batch.
+   * @param requestId - stable pending interaction id.
+   * @param answer - exact ordered answers.
+   * @returns first-response-wins receipt.
+   */
+  respondQuestion(
+    requestId: string,
+    answer: { answers: { id: string; selected: string[]; custom?: string }[] },
+  ): Promise<InteractionRespondResult> {
+    return this.respondInteraction({ requestId, kind: 'question', answer })
+  }
+
+  /**
+   * Cancel one pending user-question batch.
+   * @param requestId - stable pending interaction id.
+   * @returns first-response-wins receipt.
+   */
+  cancelQuestion(requestId: string): Promise<InteractionRespondResult> {
+    return this.respondInteraction({ requestId, kind: 'question-cancelled' })
+  }
+
+  private async respondInteraction(params: InteractionRespondParams): Promise<InteractionRespondResult> {
+    const result = await this.request('interaction/respond', params)
+    if (!isRecord(result) || typeof result.accepted !== 'boolean'
+      || (result.reason !== undefined && result.reason !== 'not-pending' && result.reason !== 'bad-response')) {
+      throw new SdkProtocolError(`interaction/respond returned malformed receipt: ${JSON.stringify(result)}`)
+    }
+    return result as unknown as InteractionRespondResult
+  }
+
+  /**
+   * Select a validated route for subsequent steps of one session.
+   * @param sessionId - target SDK session.
+   * @param provider - registered provider route.
+   * @param model - provider-owned model id.
+   * @param reasoningEffort - optional adapter-owned reasoning effort.
+   * @returns adapter-resolved route selection.
+   */
+  async selectModel(
+    sessionId: string,
+    provider: string,
+    model: string,
+    reasoningEffort?: string,
+  ): Promise<SessionSelectModelResult> {
+    const result = await this.request('session/selectModel', {
+      sessionId,
+      provider,
+      model,
+      ...reasoningEffort === undefined ? {} : { reasoningEffort },
+    })
+    if (!isRecord(result) || typeof result.provider !== 'string' || typeof result.model !== 'string'
+      || (result.reasoningEffort !== undefined && typeof result.reasoningEffort !== 'string')) {
+      throw new SdkProtocolError(`session/selectModel returned malformed selection: ${JSON.stringify(result)}`)
+    }
+    return result as unknown as SessionSelectModelResult
+  }
+
+  /**
+   * Request current activity cancellation without waiting for idle convergence.
+   * @param sessionId - existing SDK session.
+   * @returns whether running activity received the request.
+   */
+  async cancelSession(sessionId: string): Promise<boolean> {
+    const result = await this.request('session/cancel', { sessionId })
+    if (!isRecord(result) || typeof result.requested !== 'boolean') {
+      throw new SdkProtocolError(`session/cancel returned malformed acknowledgement: ${JSON.stringify(result)}`)
+    }
+    return result.requested
+  }
+
+  /**
+   * Close one runtime-owned session after its agent reaches quiescence.
+   * @param sessionId - existing SDK session.
+   * @returns whether a live or creating session was closed.
+   */
+  async closeSession(sessionId: string): Promise<boolean> {
+    const result = await this.request('session/close', { sessionId })
+    if (!isRecord(result) || typeof result.closed !== 'boolean') {
+      throw new SdkProtocolError(`session/close returned malformed result: ${JSON.stringify(result)}`)
+    }
+    return result.closed
+  }
+
+  /**
+   * List commands effective for one session.
+   * @param sessionId - target SDK session.
+   * @returns capability availability and effective descriptors.
+   */
+  async listCommands(sessionId: string): Promise<CommandListResult> {
+    const result = await this.request('command/list', { sessionId })
+    if (!isRecord(result) || typeof result.available !== 'boolean' || !Array.isArray(result.commands)
+      || !result.commands.every(validCommandDescriptor)) {
+      throw new SdkProtocolError(`command/list returned malformed result: ${JSON.stringify(result)}`)
+    }
+    return result as unknown as CommandListResult
+  }
+
+  /**
+   * Execute one slash command outside the model-message plane.
+   * @param sessionId - target SDK session.
+   * @param line - complete slash-command line.
+   * @returns structured dispatch outcome.
+   */
+  async executeCommand(sessionId: string, line: string): Promise<CommandExecuteResult> {
+    const result = await this.request('command/execute', { sessionId, line })
+    if (!validCommandResult(result)) {
+      throw new SdkProtocolError(`command/execute returned malformed result: ${JSON.stringify(result)}`)
+    }
+    return result
+  }
+
+  /**
+   * List the skill catalog for one lookup.
+   * @param cwd - optional working directory for local skill discovery.
+   * @returns the skill catalog.
+   */
+  async listSkills(cwd?: string): Promise<SkillsListResult> {
+    const result = await this.request('skills/list', cwd === undefined ? {} : { cwd })
+    if (!validSkillsListResult(result)) {
+      throw new SdkProtocolError(`skills/list returned malformed result: ${JSON.stringify(result)}`)
+    }
+    return result
+  }
+
+  /**
+   * List the agent preset roster.
+   * @returns the agent preset roster with the user's chosen default.
+   */
+  async listAgentPresets(): Promise<AgentPresetsListResult> {
+    const result = await this.request('agent-presets/list', {})
+    if (!validAgentPresetsListResult(result)) {
+      throw new SdkProtocolError(`agent-presets/list returned malformed result: ${JSON.stringify(result)}`)
+    }
+    return result
+  }
+
+  /**
+   * Describe every registered settings namespace.
+   * @returns the redacted namespace descriptors.
+   */
+  async getSettings(): Promise<SettingsGetResult> {
+    const result = await this.request('settings/get', {})
+    if (!validSettingsGetResult(result)) {
+      throw new SdkProtocolError(`settings/get returned malformed result: ${JSON.stringify(result)}`)
+    }
+    return result
+  }
+
+  /**
+   * Write one registered settings namespace.
+   * @param params - the namespace and the patch or wholesale section to apply.
+   * @returns the namespace's resolved value and revision after the write.
+   */
+  async setSettings(params: SettingsSetParams): Promise<SettingsSetResult> {
+    const result = await this.request('settings/set', { ...params })
+    if (!validSettingsSetResult(result)) {
+      throw new SdkProtocolError(`settings/set returned malformed result: ${JSON.stringify(result)}`)
+    }
+    return result
   }
 
   /**
@@ -464,6 +821,237 @@ export class HarnessClient {
  */
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function validAuthEvent(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.type !== 'string') return false
+  if (value.type === 'progress') return exactKeys(value, ['type', 'message']) && typeof value.message === 'string'
+  if (value.type === 'auth_url') return exactKeys(value, ['type', 'url'], ['instructions'])
+    && typeof value.url === 'string' && value.url.length > 0
+    && (value.instructions === undefined || typeof value.instructions === 'string')
+  if (value.type === 'device_code') return exactKeys(value, ['type', 'userCode', 'verificationUri'], ['intervalSeconds', 'expiresInSeconds'])
+    && typeof value.userCode === 'string' && value.userCode.length > 0
+    && typeof value.verificationUri === 'string' && value.verificationUri.length > 0
+    && (value.intervalSeconds === undefined || positiveSafeInteger(value.intervalSeconds))
+    && (value.expiresInSeconds === undefined || positiveSafeInteger(value.expiresInSeconds))
+  return value.type === 'info' && exactKeys(value, ['type', 'message'], ['links']) && typeof value.message === 'string'
+    && (value.links === undefined || (Array.isArray(value.links) && value.links.every(link => isRecord(link)
+      && exactKeys(link, ['url'], ['label']) && typeof link.url === 'string' && link.url.length > 0
+      && (link.label === undefined || typeof link.label === 'string'))))
+}
+
+function validAuthPrompt(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.type !== 'string' || typeof value.message !== 'string') return false
+  if (value.type === 'select') return exactKeys(value, ['type', 'message', 'options']) && Array.isArray(value.options)
+    && value.options.length > 0 && value.options.every(option => isRecord(option)
+      && exactKeys(option, ['id', 'label'], ['description']) && typeof option.id === 'string' && option.id.length > 0
+      && typeof option.label === 'string' && option.label.length > 0
+      && (option.description === undefined || typeof option.description === 'string'))
+  return (value.type === 'text' || value.type === 'secret' || value.type === 'manual_code')
+    && exactKeys(value, ['type', 'message'], ['placeholder'])
+    && (value.placeholder === undefined || typeof value.placeholder === 'string')
+}
+
+function validProviderAuthNotification(notification: HarnessNotification): boolean {
+  if (!notification.method.startsWith('provider.auth.')) return true
+  const value = notification.params
+  if (!isRecord(value) || typeof value.flowId !== 'string' || value.flowId.length === 0) return false
+  if (notification.method === 'provider.auth.event') return exactKeys(value, ['flowId', 'provider', 'event'])
+    && typeof value.provider === 'string' && value.provider.length > 0 && validAuthEvent(value.event)
+  if (notification.method === 'provider.auth.prompt') return exactKeys(value, ['flowId', 'provider', 'promptId', 'prompt'])
+    && typeof value.provider === 'string' && value.provider.length > 0
+    && typeof value.promptId === 'string' && value.promptId.length > 0 && validAuthPrompt(value.prompt)
+  if (notification.method === 'provider.auth.promptResolved') return exactKeys(value, ['flowId', 'promptId'])
+    && typeof value.promptId === 'string' && value.promptId.length > 0
+  if (notification.method === 'provider.auth.finished') return exactKeys(value, ['flowId', 'provider', 'outcome'], ['message'])
+    && typeof value.provider === 'string' && value.provider.length > 0
+    && (value.outcome === 'success' || value.outcome === 'cancelled' || value.outcome === 'error')
+    && (value.message === undefined || typeof value.message === 'string')
+  return false
+}
+
+function validProviderAuthInfo(value: unknown): value is ProviderAuthInfoResult {
+  if (!isRecord(value) || !exactKeys(value, ['provider', 'methods', 'configured'], ['credentialType', 'source'])
+    || typeof value.provider !== 'string' || value.provider.length === 0
+    || typeof value.configured !== 'boolean' || !Array.isArray(value.methods)
+    || !value.methods.every(method => isRecord(method) && exactKeys(method, ['type', 'label'])
+      && (method.type === 'api_key' || method.type === 'oauth')
+      && typeof method.label === 'string' && method.label.length > 0)
+    || (value.credentialType !== undefined && value.credentialType !== 'api_key' && value.credentialType !== 'oauth')
+    || (value.source !== undefined && (typeof value.source !== 'string' || value.source.length === 0))) return false
+  const types = value.methods.map(method => (method as Record<string, unknown>).type)
+  return new Set(types).size === types.length
+}
+
+function validCatalogReasoning(value: unknown): boolean {
+  if (!isRecord(value) || !Array.isArray(value.efforts) || value.efforts.length === 0
+    || (value.defaultEffort !== undefined && typeof value.defaultEffort !== 'string')) return false
+  if (!value.efforts.every(effort => isRecord(effort)
+    && typeof effort.id === 'string' && effort.id.length > 0
+    && typeof effort.name === 'string' && effort.name.length > 0
+    && (effort.description === undefined || typeof effort.description === 'string'))) return false
+  const ids = value.efforts.map(effort => (effort as Record<string, unknown>).id as string)
+  return new Set(ids).size === ids.length
+    && (value.defaultEffort === undefined || ids.includes(value.defaultEffort))
+}
+
+function validProviderCatalog(value: unknown): boolean {
+  return isRecord(value) && typeof value.id === 'string' && typeof value.name === 'string'
+    && Array.isArray(value.models) && value.models.every(model => isRecord(model)
+      && typeof model.id === 'string' && typeof model.name === 'string'
+      && (model.description === undefined || typeof model.description === 'string')
+      && (model.inputModalities === undefined
+        || (Array.isArray(model.inputModalities) && model.inputModalities.every(item => typeof item === 'string')))
+      && (model.reasoning === undefined || validCatalogReasoning(model.reasoning)))
+}
+
+function validCatalogFailure(value: unknown): boolean {
+  return isRecord(value) && typeof value.id === 'string' && typeof value.name === 'string'
+    && typeof value.message === 'string'
+}
+
+const IMAGE_MEDIA_TYPES = new Set<ImageMediaType>(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+
+function exactKeys(value: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): boolean {
+  const keys = Object.keys(value)
+  return required.every(key => key in value)
+    && keys.every(key => required.includes(key) || optional.includes(key))
+}
+
+function positiveSafeInteger(value: unknown): boolean {
+  return Number.isSafeInteger(value) && Number(value) > 0
+}
+
+function validImageLimits(value: unknown): value is ImageAttachmentLimits {
+  if (!isRecord(value) || !exactKeys(value, [
+    'maxImageBytes', 'maxImagesPerMessage', 'maxMessageImageBytes', 'maxImagePixels', 'mediaTypes',
+  ])) return false
+  return positiveSafeInteger(value.maxImageBytes)
+    && positiveSafeInteger(value.maxImagesPerMessage)
+    && positiveSafeInteger(value.maxMessageImageBytes)
+    && positiveSafeInteger(value.maxImagePixels)
+    && Array.isArray(value.mediaTypes) && value.mediaTypes.length > 0
+    && value.mediaTypes.every(item => typeof item === 'string' && IMAGE_MEDIA_TYPES.has(item as ImageMediaType))
+    && new Set(value.mediaTypes).size === value.mediaTypes.length
+}
+
+function validImageRef(value: unknown): value is ImageAttachmentRef {
+  return isRecord(value)
+    && exactKeys(value, ['attachmentId', 'mediaType', 'bytes', 'width', 'height'], ['name'])
+    && typeof value.attachmentId === 'string' && value.attachmentId.length > 0
+    && typeof value.mediaType === 'string' && IMAGE_MEDIA_TYPES.has(value.mediaType as ImageMediaType)
+    && positiveSafeInteger(value.bytes) && positiveSafeInteger(value.width) && positiveSafeInteger(value.height)
+    && (value.name === undefined || (typeof value.name === 'string' && value.name.length > 0))
+}
+
+function validSessionHeader(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && value.version === 0 && typeof value.id === 'string'
+    && Number.isSafeInteger(value.createdAt) && Number(value.createdAt) >= 0
+    && (value.cwd === undefined || typeof value.cwd === 'string')
+    && (value.parentSession === undefined || typeof value.parentSession === 'string')
+    && (value.seedLength === undefined
+      || (Number.isSafeInteger(value.seedLength) && Number(value.seedLength) >= 0))
+    && (value.origin === undefined || value.origin === 'subagent')
+    && (value.delegationDepth === undefined
+      || (Number.isSafeInteger(value.delegationDepth) && Number(value.delegationDepth) >= 0))
+    && (value.agentPreset === undefined || typeof value.agentPreset === 'string')
+}
+
+function validJsonValue(value: unknown): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true
+  if (typeof value === 'number') return Number.isFinite(value)
+  if (Array.isArray(value)) return value.every(validJsonValue)
+  return isRecord(value) && Object.values(value).every(validJsonValue)
+}
+
+function validSurfaceOp(value: unknown): boolean {
+  return value === 'append' || (isRecord(value)
+    && Object.keys(value).length === 3
+    && value.op === 'replace'
+    && Number.isSafeInteger(value.start) && Number(value.start) >= 0
+    && Number.isSafeInteger(value.end) && Number(value.end) >= 0)
+}
+
+function validSessionEventLog(values: unknown[]): boolean {
+  return values.every((value, index) => isRecord(value)
+    && Object.keys(value).every(key => [
+      'type', 'seq', 'time', 'data', 'surfaceOp', 'sourceEventSeqs', 'ignorable',
+    ].includes(key))
+    && typeof value.type === 'string' && value.type.length > 0
+    && value.seq === index
+    && Number.isSafeInteger(value.time)
+    && isRecord(value.data) && validJsonValue(value.data)
+    && (value.surfaceOp === undefined || validSurfaceOp(value.surfaceOp))
+    && (value.sourceEventSeqs === undefined || (Array.isArray(value.sourceEventSeqs)
+      && value.sourceEventSeqs.every(seq => Number.isSafeInteger(seq) && Number(seq) >= 0)))
+    && (value.ignorable === undefined || value.ignorable === true))
+}
+
+function validSessionListEntry(value: unknown): boolean {
+  return isRecord(value) && validSessionHeader(value.header)
+    && typeof value.live === 'boolean' && typeof value.persisted === 'boolean'
+}
+
+function validCommandDescriptor(value: unknown): boolean {
+  return isRecord(value) && typeof value.name === 'string' && typeof value.description === 'string'
+    && (value.input === undefined || (isRecord(value.input) && typeof value.input.hint === 'string'))
+}
+
+function validCommandResult(value: unknown): value is CommandExecuteResult {
+  if (!isRecord(value) || typeof value.outcome !== 'string') return false
+  switch (value.outcome) {
+    case 'unavailable':
+    case 'unknown-command':
+      return typeof value.message === 'string'
+    case 'error':
+      return typeof value.message === 'string' && (value.commandId === undefined || typeof value.commandId === 'string')
+    case 'success':
+      return typeof value.commandId === 'string'
+        && (value.text === undefined || typeof value.text === 'string')
+        && (value.sourceEventSeq === undefined || (Number.isSafeInteger(value.sourceEventSeq) && Number(value.sourceEventSeq) >= 0))
+    default:
+      return false
+  }
+}
+
+function validSkillSummary(value: unknown): boolean {
+  return isRecord(value) && typeof value.name === 'string' && typeof value.description === 'string'
+    && (value.whenToUse === undefined || typeof value.whenToUse === 'string')
+    && typeof value.source === 'string' && typeof value.provider === 'string'
+    && typeof value.modelInvocable === 'boolean' && typeof value.userInvocable === 'boolean'
+}
+
+function validSkillsListResult(value: unknown): value is SkillsListResult {
+  return isRecord(value) && Array.isArray(value.skills) && value.skills.every(validSkillSummary)
+}
+
+function validAgentPreset(value: unknown): boolean {
+  return isRecord(value) && typeof value.id === 'string' && typeof value.trust === 'string'
+    && typeof value.path === 'string'
+    && (value.name === undefined || typeof value.name === 'string')
+    && (value.description === undefined || typeof value.description === 'string')
+    && (value.order === undefined || Number.isSafeInteger(value.order))
+    && (value.broken === undefined || typeof value.broken === 'string')
+}
+
+function validAgentPresetsListResult(value: unknown): value is AgentPresetsListResult {
+  return isRecord(value) && Array.isArray(value.presets) && value.presets.every(validAgentPreset)
+    && (value.defaultId === undefined || typeof value.defaultId === 'string')
+}
+
+function validSettingsNamespace(value: unknown): value is SettingsNamespaceWire {
+  return isRecord(value) && typeof value.ns === 'string'
+    && typeof value.revision === 'number' && Number.isSafeInteger(value.revision) && value.revision >= 0
+    && (value.applies === 'live' || value.applies === 'restart')
+}
+
+function validSettingsGetResult(value: unknown): value is SettingsGetResult {
+  return isRecord(value) && Array.isArray(value.namespaces) && value.namespaces.every(validSettingsNamespace)
+}
+
+function validSettingsSetResult(value: unknown): value is SettingsSetResult {
+  return isRecord(value) && typeof value.ns === 'string'
+    && typeof value.revision === 'number' && Number.isSafeInteger(value.revision) && value.revision >= 0
 }
 
 /** The message of a thrown value (the transport only throws `Error`s; `String` covers the rest). */

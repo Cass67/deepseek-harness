@@ -15,6 +15,9 @@
       "path": "../../../vendor/schemastery"
     },
     {
+      "path": "../../attachment/attachment"
+    },
+    {
       "path": "../../llm/llm"
     },
     {
@@ -27,6 +30,18 @@
       "path": "../../core/session"
     },
     {
+      "path": "../../interaction/commands"
+    },
+    {
+      "path": "../../interaction/user-approval"
+    },
+    {
+      "path": "../../interaction/user-questions"
+    },
+    {
+      "path": "../../session-query/session-query"
+    },
+    {
       "path": "../protocol"
     },
     {
@@ -34,6 +49,12 @@
     },
     {
       "path": "../../runtime-diagnostics/invariants"
+    },
+    {
+      "path": "../../skill/skill"
+    },
+    {
+      "path": "../../preset/agent-presets"
     }
   ]
 }
