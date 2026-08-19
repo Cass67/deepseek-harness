@@ -9,7 +9,7 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent, type AgentHandle } from '@deepseek-ai/dsh-agent'
 import { AttachmentId, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type AttachmentStore from '@deepseek-ai/dsh-attachment'
-import LocalAttachmentStore from '@deepseek-ai/dsh-attachment-local'
+import LocalAttachmentStore, { DEFAULT_MAX_IMAGE_BYTES } from '@deepseek-ai/dsh-attachment-local'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 
 import SessionStore, { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
@@ -186,7 +186,7 @@ describe('HarnessSdkJsonRpcServer', () => {
     const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
     try {
       await expect(server.handleRequest('attachment/imageLimits', undefined)).resolves.toMatchObject({
-        maxImageBytes: 5 * 1024 * 1024,
+        maxImageBytes: DEFAULT_MAX_IMAGE_BYTES,
         mediaTypes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'],
       })
       const named = await server.handleRequest('attachment/saveImage', {

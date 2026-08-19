@@ -28,7 +28,6 @@ import type SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import type { SubagentRunEndInfo } from '@deepseek-ai/dsh-subagent'
 import type { SkillSummary } from '@deepseek-ai/dsh-skill'
 import type { AgentPreset } from '@deepseek-ai/dsh-agent-presets'
-import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek'
 import type {
@@ -621,7 +620,7 @@ export class HarnessSdkJsonRpcServer {
     const controller = new AbortController()
     const done = (async (): Promise<CommandExecuteResult> => {
       try {
-        const execution = await commands.execute(rec.handle.agent, params.line, controller.signal)
+        const execution = await commands.execute(rec.handle.agent, params.line, [], controller.signal)
         if (execution === undefined) {
           return { outcome: 'unknown-command', message: `unknown or invalid command: ${params.line}` }
         }
@@ -696,8 +695,8 @@ export class HarnessSdkJsonRpcServer {
    * Describe every registered settings namespace for a configuration client.
    * @returns the redacted namespace descriptors.
    */
-  async settingsGet(): Promise<SettingsGetResult> {
-    const settings = this.ctx.get('settings') as SettingsProvider | undefined
+  settingsGet(): SettingsGetResult {
+    const settings = this.ctx.get('settings')
     if (settings === undefined) return { namespaces: [] }
     const namespaces: SettingsNamespaceWire[] = settings
       .describe({ redactSecrets: true })
@@ -717,7 +716,7 @@ export class HarnessSdkJsonRpcServer {
    * @returns the namespace's resolved value and revision after the write.
    */
   async settingsSet(params: Record<string, unknown> | undefined): Promise<SettingsSetResult> {
-    const settings = this.ctx.get('settings') as SettingsProvider | undefined
+    const settings = this.ctx.get('settings')
     if (settings === undefined) throw new Error('no settings provider is mounted')
     const namespace = settingsNamespace(nonEmptyStringParam(params, 'namespace'))
     const patch = params?.patch
