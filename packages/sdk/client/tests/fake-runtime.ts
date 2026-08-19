@@ -250,6 +250,7 @@ reader.on('line', (line) => {
         maxImagesPerMessage: 4,
         maxMessageImageBytes: 4096,
         maxImagePixels: 1_000_000,
+        maxImageDimension: 2000,
         mediaTypes: ['image/png', 'image/jpeg'],
       } : { maxImageBytes: 'large', mediaTypes: ['image/png'] })
       return

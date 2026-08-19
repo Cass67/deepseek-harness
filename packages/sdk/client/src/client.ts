@@ -924,12 +924,13 @@ function positiveSafeInteger(value: unknown): boolean {
 
 function validImageLimits(value: unknown): value is ImageAttachmentLimits {
   if (!isRecord(value) || !exactKeys(value, [
-    'maxImageBytes', 'maxImagesPerMessage', 'maxMessageImageBytes', 'maxImagePixels', 'mediaTypes',
+    'maxImageBytes', 'maxImagesPerMessage', 'maxMessageImageBytes', 'maxImagePixels', 'maxImageDimension', 'mediaTypes',
   ])) return false
   return positiveSafeInteger(value.maxImageBytes)
     && positiveSafeInteger(value.maxImagesPerMessage)
     && positiveSafeInteger(value.maxMessageImageBytes)
     && positiveSafeInteger(value.maxImagePixels)
+    && positiveSafeInteger(value.maxImageDimension)
     && Array.isArray(value.mediaTypes) && value.mediaTypes.length > 0
     && value.mediaTypes.every(item => typeof item === 'string' && IMAGE_MEDIA_TYPES.has(item as ImageMediaType))
     && new Set(value.mediaTypes).size === value.mediaTypes.length
