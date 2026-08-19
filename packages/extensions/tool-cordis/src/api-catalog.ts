@@ -831,6 +831,22 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the advertised models, deduplicated in endpoint order.',
       },
       {
+        signature: 'authInfo(provider: string): Promise<LlmProviderAuthInfo>',
+        description: 'Return non-secret provider-native authentication methods and status.',
+        parameters: [{ name: 'provider', description: 'registered provider route to inspect.' }],
+        returns: 'adapter-owned method labels and configured status.',
+      },
+      {
+        signature: 'login(provider: string, type: \'api_key\' | \'oauth\', interaction: LlmAuthInteraction): Promise<void>',
+        description: 'Run one login flow through the adapter owning the route.',
+        parameters: [{ name: 'provider', description: 'registered provider route to authenticate.' }, { name: 'type', description: 'exact authentication method selected by the user.' }, { name: 'interaction', description: 'surface-owned prompt and progress callbacks.' }],
+      },
+      {
+        signature: 'logout(provider: string): Promise<void>',
+        description: 'Remove the route\'s provider-owned stored credential.',
+        parameters: [{ name: 'provider', description: 'registered provider route to disconnect.' }],
+      },
+      {
         signature: 'providerRetryPolicy(provider: string): ResolvedRetryPolicy',
         description: 'Resolve the retry policy captured when one provider route was registered.',
         parameters: [{ name: 'provider', description: 'registered provider route to inspect.' }],
@@ -2788,10 +2804,6 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface CommandDefinition {\n    readonly name: string;\n    readonly description: string;\n    readonly input?: CommandInputDescriptor;\n    readonly recordInput?: boolean;\n    readonly handler: (invocation: CommandInvocation) => CommandResult | Promise<CommandResult>;\n}',
   },
   {
-    name: 'CommandDescriptor',
-    declaration: 'export interface CommandDescriptor {\n    readonly name: string;\n    readonly description: string;\n    readonly input?: CommandInputDescriptor;\n}',
-  },
-  {
     name: 'CommandExecution',
     declaration: 'export interface CommandExecution {\n    readonly commandId: CommandId;\n    readonly result: CommandResult;\n}',
   },
@@ -3269,7 +3281,19 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmAdapter',
-    declaration: 'export abstract class LlmAdapter {\n    providerInfo(provider: string): LlmProviderInfo;\n    providerRetryPolicy(_provider: string): ResolvedRetryPolicy | undefined;\n    listModels(_provider: string): Promise<readonly LlmModelInfo[]>;\n    resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo>;\n    abstract stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
+    declaration: 'export abstract class LlmAdapter {\n    providerInfo(provider: string): LlmProviderInfo;\n    providerRetryPolicy(_provider: string): ResolvedRetryPolicy | undefined;\n    listModels(_provider: string): Promise<readonly LlmModelInfo[]>;\n    resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo>;\n    authInfo(provider: string): Promise<LlmProviderAuthInfo>;\n    login(_provider: string, _type: \'api_key\' | \'oauth\', _interaction: LlmAuthInteraction): Promise<void>;\n    logout(_provider: string): Promise<void>;\n    abstract stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
+  },
+  {
+    name: 'LlmAuthEvent',
+    declaration: 'export type LlmAuthEvent = {\n    type: \'info\';\n    message: string;\n    links?: readonly {\n        url: string;\n        label?: string;\n    }[];\n} | {\n    type: \'auth_url\';\n    url: string;\n    instructions?: string;\n} | {\n    type: \'device_code\';\n    userCode: string;\n    verificationUri: string;\n    intervalSeconds?: number;\n    expiresInSeconds?: number;\n} | {\n    type: \'progress\';\n    message: string;\n};',
+  },
+  {
+    name: 'LlmAuthInteraction',
+    declaration: 'export interface LlmAuthInteraction {\n    signal?: AbortSignal;\n    prompt(prompt: LlmAuthPrompt): Promise<string>;\n    notify(event: LlmAuthEvent): void;\n}',
+  },
+  {
+    name: 'LlmAuthPrompt',
+    declaration: 'export type LlmAuthPrompt = {\n    type: \'text\' | \'secret\' | \'manual_code\';\n    message: string;\n    placeholder?: string;\n    signal?: AbortSignal;\n} | {\n    type: \'select\';\n    message: string;\n    options: readonly {\n        id: string;\n        label: string;\n        description?: string;\n    }[];\n    signal?: AbortSignal;\n};',
   },
   {
     name: 'LlmCallConfig',
@@ -3308,6 +3332,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface LlmModelReasoningInfo {\n    efforts: readonly LlmReasoningEffortInfo[];\n    defaultEffort?: ReasoningEffortId;\n}',
   },
   {
+    name: 'LlmProviderAuthInfo',
+    declaration: 'export interface LlmProviderAuthInfo {\n    provider: string;\n    methods: readonly LlmProviderAuthMethod[];\n    configured: boolean;\n    credentialType?: \'api_key\' | \'oauth\';\n    source?: string;\n}',
+  },
+  {
+    name: 'LlmProviderAuthMethod',
+    declaration: 'export interface LlmProviderAuthMethod {\n    type: \'api_key\' | \'oauth\';\n    label: string;\n}',
+  },
+  {
     name: 'LlmProviderInfo',
     declaration: 'export interface LlmProviderInfo {\n    id: string;\n    name: string;\n}',
   },
@@ -3321,7 +3353,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmRuntime',
-    declaration: 'export class LlmRuntime extends Service {\n    constructor(ctx: Context);\n    registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle;\n    listProviders(): LlmProviderInfo[];\n    registerConfigurableProviders(entries: readonly LlmConfigurableProvider[]): DirectoryRegistrationHandle;\n    listConfigurableProviders(): LlmConfigurableProvider[];\n    registerModelDiscovery(settingsNs: string, discover: (request: LlmModelDiscoveryRequest) => Promise<readonly LlmDiscoveredModel[]>): () => void;\n    async discoverModels(settingsNs: string, request: LlmModelDiscoveryRequest): Promise<LlmDiscoveredModel[]>;\n    providerRetryPolicy(provider: string): ResolvedRetryPolicy;\n    async listModels(provider: string): Promise<LlmModelInfo[]>;\n    async resolveModelInfo(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo>;\n    async resolveCallConfig(config: LlmCallConfig, signal?: AbortSignal): Promise<LlmCallConfig>;\n    async prepareCall(config: LlmCallConfig, signal?: AbortSignal): Promise<PreparedLlmCall>;\n    stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
+    declaration: 'export class LlmRuntime extends Service {\n    constructor(ctx: Context);\n    registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle;\n    listProviders(): LlmProviderInfo[];\n    registerConfigurableProviders(entries: readonly LlmConfigurableProvider[]): DirectoryRegistrationHandle;\n    listConfigurableProviders(): LlmConfigurableProvider[];\n    registerModelDiscovery(settingsNs: string, discover: (request: LlmModelDiscoveryRequest) => Promise<readonly LlmDiscoveredModel[]>): () => void;\n    async discoverModels(settingsNs: string, request: LlmModelDiscoveryRequest): Promise<LlmDiscoveredModel[]>;\n    authInfo(provider: string): Promise<LlmProviderAuthInfo>;\n    login(provider: string, type: \'api_key\' | \'oauth\', interaction: LlmAuthInteraction): Promise<void>;\n    logout(provider: string): Promise<void>;\n    providerRetryPolicy(provider: string): ResolvedRetryPolicy;\n    async listModels(provider: string): Promise<LlmModelInfo[]>;\n    async resolveModelInfo(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo>;\n    async resolveCallConfig(config: LlmCallConfig, signal?: AbortSignal): Promise<LlmCallConfig>;\n    async prepareCall(config: LlmCallConfig, signal?: AbortSignal): Promise<PreparedLlmCall>;\n    stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
   },
   {
     name: 'LspHover',

@@ -319,26 +319,24 @@ describe('hand-declared providers', () => {
       // endpoint, and headers can carry, so a route naming one would be built
       // unable to authenticate.
       expect(supportedProtocols()).not.toContain(api)
-      expect(() => buildProvider({ provider: 'acme-gateway', displayName: 'Acme', api, models: [], namesCredential: true }))
+      expect(() => buildProvider({ provider: 'acme-gateway', displayName: 'Acme', api, models: [], namesCredential: true, hasRequestHeaders: false }))
         .toThrow(/cannot serve; supported protocols are/)
     },
   )
 
   it('rejects a protocol this build cannot serve, and a route that names none', () => {
-    const spec = { provider: 'acme-gateway', displayName: 'Acme Gateway', models: [], namesCredential: true }
+    const spec = {
+      provider: 'acme-gateway', displayName: 'Acme Gateway', models: [], namesCredential: true, hasRequestHeaders: false,
+    }
     expect(() => buildProvider({ ...spec, api: 'quantum-telepathy' }))
       .toThrow(/cannot serve; supported protocols are/)
     expect(() => buildProvider(spec)).toThrow(/cannot serve; supported protocols are/)
   })
 
-  it('leaves an unauthenticated route to its protocol rather than inventing a credential', async () => {
+  it('reports an unconfigured declared route until native API-key login completes', async () => {
     const server = await mockServer([{ events: textEvents }])
-    // Naming no credential is the deliberately unauthenticated posture — a
-    // named reference that resolved to nothing would have failed with
-    // MISSING_CREDENTIAL long before this point. The route resolves as
-    // configured and the protocol decides: pi-ai's OpenAI-compatible
-    // implementation wants a key or an Authorization header of its own, and
-    // says so instead of the harness guessing a placeholder.
+    // A declared route with neither a named reference nor deployment headers
+    // offers native masked login; until then it is honestly unconfigured.
     const ctx = await harness({
       providers: {
         'local-llm': {
@@ -352,7 +350,7 @@ describe('hand-declared providers', () => {
     const result = await assemble(ctx, { provider: 'local-llm', model: 'qwen3', messages: [] })
     expect(result.finish).toMatchObject({
       kind: 'error',
-      failure: { message: 'No API key for provider: local-llm' },
+      failure: { message: 'Provider is not configured: local-llm' },
     })
     expect(server.requests).toHaveLength(0)
   })
@@ -577,10 +575,9 @@ describe('catalog routes with per-model configuration', () => {
     expect(auth?.auth.apiKey).toBe('codex-token')
   })
 
-  it('leaves an OAuth-only catalog route unconfigured when its profile names no key', () => {
-    // Nothing to add: this adapter resolves credentials through its own seam
-    // and holds no OAuth store, so declaring the provider configured would
-    // trade a truthful refusal for an endpoint's 401.
+  it('keeps OAuth-only native auth when its profile names no key', () => {
+    // Nothing is added to the provider: the adapter-level Models collection
+    // supplies its durable credential store when this route runs.
     const resolved = resolveProfiles({ 'openai-codex': {} })
     expect(resolved.get('openai-codex')?.piProvider.auth.apiKey).toBeUndefined()
   })
@@ -934,30 +931,16 @@ describe('configurable-provider directory', () => {
     expect(ctx.llm.listConfigurableProviders()).toHaveLength(catalogOnly)
   })
 
-  it('withholds a catalog route this adapter cannot authenticate', async () => {
+  it('offers OAuth-only catalog routes now that native login is durable', async () => {
     const ctx = await harness({})
     const offered = ctx.llm.listConfigurableProviders().map(entry => entry.provider)
 
-    // `openai-codex` is the one installed provider that authenticates through
-    // OAuth alone. pi-ai resolves OAuth only from a *stored* credential, this
-    // adapter constructs its collection with no credential store, and nothing
-    // here runs a login flow — so every request on such a route fails with
-    // `Provider is not configured` before it goes out. Offering it would put a
-    // provider on the settings page that no amount of configuration can make
-    // work.
-    expect(offered).not.toContain('openai-codex')
-    // A provider that offers OAuth *beside* an api-key method keeps its entry:
-    // the key is a path this adapter can serve.
+    expect(offered).toContain('openai-codex')
     expect(offered).toContain('anthropic')
     expect(offered).toContain('openai')
   })
 
-  it('still lists a withheld route a stored profile names, as a catalog route', async () => {
-    // Withholding the offer must not strand a profile someone already stored:
-    // the route keeps its entry so a configuration surface can edit or delete
-    // it, and `declared` still answers catalog membership rather than the
-    // offer, so the page does not mislabel it as a route this deployment
-    // invented.
+  it('lists an explicitly configured OAuth route as a catalog route', async () => {
     const ctx = await harness({ providers: { 'openai-codex': { apiKeyEnv: KEY_ENV } } })
 
     expect(ctx.llm.listConfigurableProviders()).toContainEqual({

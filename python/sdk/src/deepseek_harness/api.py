@@ -7,7 +7,15 @@ from typing import Callable
 
 from .client import HarnessClient, HarnessConfig
 from .errors import SdkProtocolError
-from .models import JsonObject, Notification
+from .models import (
+    ImageAttachmentLimits,
+    ImageAttachmentRef,
+    ImageMediaType,
+    JsonObject,
+    Notification,
+    SessionHistoryResponse,
+    SessionListResponse,
+)
 
 
 @dataclass(slots=True)
@@ -113,6 +121,37 @@ class DeepSeekHarness:
     def start_session(self, session_id: str | None = None) -> "Session":
         self.start()
         return Session(self, session_id or f"session-{uuid.uuid4().hex}")
+
+    def image_limits(self) -> ImageAttachmentLimits:
+        """Return deployment-resolved image upload limits."""
+        self.start()
+        return self._client.image_limits()
+
+    def save_image(
+        self,
+        data: bytes,
+        media_type: ImageMediaType,
+        name: str | None = None,
+    ) -> ImageAttachmentRef:
+        """Save encoded image bytes for a later image content block."""
+        self.start()
+        return self._client.save_image(data, media_type, name)
+
+    def list_sessions(self) -> SessionListResponse:
+        """List durable and live sessions through the runtime query service."""
+        self.start()
+        return self._client.list_sessions()
+
+    def session_history(self, session_id: str) -> SessionHistoryResponse:
+        """Read one complete durable history without resuming its agent."""
+        self.start()
+        return self._client.session_history(session_id)
+
+    def resume_session(self, session_id: str) -> "Session":
+        """Explicitly resume one persisted session and return its stable handle."""
+        self.start()
+        self._client.resume_session(session_id)
+        return Session(self, session_id)
 
     def run(
         self,

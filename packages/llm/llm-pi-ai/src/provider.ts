@@ -11,10 +11,9 @@
  * catalog route pointed at a different protocol — is built by `createProvider`
  * over the protocol table below.
  *
- * Credentials never reach this module's storage: the harness resolves a route's
- * key through `ctx.credentials` before the request enters pi-ai and hands it
- * over as a stream option, which `Models` presents to `resolve()` as the
- * credential key.
+ * Provider-native credentials remain in the adapter-owned `CredentialStore`;
+ * an explicit profile `apiKeyEnv` is still resolved by the harness and handed
+ * over as a per-request override.
  *
  * @module dsh-llm-pi-ai/provider
  */
@@ -63,24 +62,32 @@ export function supportedProtocols(): readonly string[] {
 }
 
 /**
- * Api-key auth for a route the harness authenticates itself. `Models` calls
- * this after the adapter has already resolved the route's credential, so a
- * missing key here is not this layer's failure: a named-but-unresolvable
- * reference has already failed the request with `MISSING_CREDENTIAL`, and a
- * route naming no credential at all is deliberately unauthenticated. Reporting
- * it as configured hands the decision to the protocol, which is where the
- * requirement actually lives — pi-ai's OpenAI-compatible implementation, for
- * one, still insists on a key or an `Authorization` header of its own.
+ * Api-key auth for a hand-declared or explicitly keyed route. A route naming
+ * `apiKeyEnv` receives only request-time override resolution; an unreferenced
+ * hand-declared route also receives native masked login backed by the adapter
+ * credential store.
  * @param name - display name used as the resolution's status label.
+ * @param interactive - whether to offer native API-key login.
+ * @param allowKeyless - whether request overrides or deployment headers satisfy auth.
  * @returns the api-key auth for a harness-authenticated route.
  */
-function harnessApiKeyAuth(name: string): ApiKeyAuth {
+function harnessApiKeyAuth(name: string, interactive: boolean, allowKeyless: boolean): ApiKeyAuth {
   return {
     name,
-    resolve: ({ credential }) => Promise.resolve({
-      auth: credential?.key === undefined ? {} : { apiKey: credential.key },
-      source: name,
-    }),
+    ...interactive ? {
+      login: async interaction => ({
+        type: 'api_key' as const,
+        key: await interaction.prompt({ type: 'secret', message: `Enter ${name} API key` }),
+      }),
+    } : {},
+    resolve: ({ credential }) => Promise.resolve(
+      credential?.key === undefined && !allowKeyless
+        ? undefined
+        : {
+          auth: credential?.key === undefined ? {} : { apiKey: credential.key },
+          source: name,
+        },
+    ),
   }
 }
 
@@ -104,6 +111,8 @@ export interface ProviderSpec {
    * request, never at construction.
    */
   namesCredential: boolean
+  /** Whether deployment headers may authenticate an otherwise keyless declared route. */
+  hasRequestHeaders: boolean
 }
 
 /**
@@ -121,17 +130,24 @@ export interface ProviderSpec {
  * honouring the override), so an OAuth-only provider — `openai-codex` is the
  * one the installed catalog ships — would refuse a profile's explicit key with
  * `Provider is not configured` before any request went out. Adding the harness
- * method beside the provider's own restores that route. A keyless profile adds
- * nothing and still reports the honest refusal, because this adapter resolves
- * credentials through its own seam and holds no OAuth store to fall back on.
+ * method beside the provider's own restores that explicit-reference route;
+ * a keyless profile keeps native OAuth backed by the adapter credential store.
  * @param spec - the resolved route facts.
  * @param catalog - the installed catalog provider, when pi-ai ships one.
  * @returns the auth to construct this route's provider with.
  */
 function routeAuth(spec: ProviderSpec, catalog: Provider | undefined): Provider['auth'] {
-  if (catalog === undefined) return { apiKey: harnessApiKeyAuth(spec.displayName) }
+  if (catalog === undefined) {
+    return {
+      apiKey: harnessApiKeyAuth(
+        spec.displayName,
+        !spec.namesCredential && !spec.hasRequestHeaders,
+        spec.namesCredential || spec.hasRequestHeaders,
+      ),
+    }
+  }
   if (catalog.auth.apiKey !== undefined || !spec.namesCredential) return catalog.auth
-  return { ...catalog.auth, apiKey: harnessApiKeyAuth(spec.displayName) }
+  return { ...catalog.auth, apiKey: harnessApiKeyAuth(spec.displayName, false, true) }
 }
 
 /**

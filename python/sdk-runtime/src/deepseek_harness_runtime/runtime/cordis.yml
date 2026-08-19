@@ -2,9 +2,28 @@
 # $DSH_CORDIS_CONFIG or argv path; the SDK injects this path for bundled
 # zero-config launches. SDK-set session-root and cwd variables have manual-run fallbacks.
 
+# Durable owner-private image objects live under DSH_HOME, never the workspace
+# or session root. Omission retains attachment-local's ~/.dsh fallback.
+- id: attachments
+  name: '@deepseek-ai/dsh-attachment-local'
+  config:
+    dshHome: !!js process.env.DSH_HOME
+
 # Stdio JSON-RPC server entry; without it the agent has no SDK client.
 - id: sdk-jsonrpc-server
   name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
+
+# Human commands execute directly over JSON-RPC and never become user messages.
+- id: commands
+  name: '@deepseek-ai/dsh-commands'
+
+- id: user-approval
+  name: '@deepseek-ai/dsh-user-approval'
+  config:
+    policy: ask
+
+- id: user-questions
+  name: '@deepseek-ai/dsh-user-questions'
 
 # Agent spine; the SDK server creates agents per sessionId.
 - id: agent-core
@@ -30,6 +49,21 @@
 # the request, tool-dispatch, and completed-step durability checkpoints.
 - id: session-checkpoints
   name: '@deepseek-ai/dsh-session-checkpoint-policy'
+
+- id: session-query
+  name: '@deepseek-ai/dsh-session-query-sqlite'
+  config:
+    path: ':memory:'
+    openAt: never
+
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
+
+- id: compaction-basic
+  name: '@deepseek-ai/dsh-compaction-basic'
+
+- id: command-compact
+  name: '@deepseek-ai/dsh-command-compact'
 
 # Local bash executor; $DSH_CWD wins over the process cwd.
 # Managed child-process groups for the bash executor (spawn/kill/output plumbing).

@@ -390,6 +390,55 @@ interface LlmProviderInfo {
 }
 ```
 
+认证留在提供方控制面。状态只公开方法标签与来源元数据；登录 prompt 的响应只在界面与适配器之间流动，绝不会变成模型内容。
+
+```ts type-equiv
+/** Provider-native authentication method offered by one route. */
+interface LlmProviderAuthMethod {
+  type: 'api_key' | 'oauth'
+  label: string
+}
+
+/** Non-secret authentication state for one route. */
+interface LlmProviderAuthInfo {
+  provider: string
+  methods: readonly LlmProviderAuthMethod[]
+  configured: boolean
+  credentialType?: 'api_key' | 'oauth'
+  source?: string
+}
+
+/** One provider-native login prompt. */
+type LlmAuthPrompt =
+  | { type: 'text' | 'secret' | 'manual_code'; message: string; placeholder?: string; signal?: AbortSignal }
+  | {
+    type: 'select'
+    message: string
+    options: readonly { id: string; label: string; description?: string }[]
+    signal?: AbortSignal
+  }
+
+/** Non-secret progress emitted during provider-native login. */
+type LlmAuthEvent =
+  | { type: 'info'; message: string; links?: readonly { url: string; label?: string }[] }
+  | { type: 'auth_url'; url: string; instructions?: string }
+  | {
+    type: 'device_code'
+    userCode: string
+    verificationUri: string
+    intervalSeconds?: number
+    expiresInSeconds?: number
+  }
+  | { type: 'progress'; message: string }
+
+/** Interaction callbacks used by adapter-owned authentication. */
+interface LlmAuthInteraction {
+  signal?: AbortSignal
+  prompt(prompt: LlmAuthPrompt): Promise<string>
+  notify(event: LlmAuthEvent): void
+}
+```
+
 适配器插件还会通过 `registerConfigurableProviders()` 声明哪些路由*可以*运行，并指明每条路由的用户设置分节，使配置界面能在任何路由注册之前就呈现休眠的提供方。
 
 ```ts type-equiv
@@ -809,6 +858,27 @@ registerModelDiscovery( settingsNs: string, discover: (request: LlmModelDiscover
 async discoverModels( settingsNs: string, request: LlmModelDiscoveryRequest, ): Promise<LlmDiscoveredModel[]>
 
 /**
+ * Return non-secret provider-native authentication methods and status.
+ * @param provider - registered provider route to inspect.
+ * @returns adapter-owned method labels and configured status.
+ */
+authInfo(provider: string): Promise<LlmProviderAuthInfo>
+
+/**
+ * Run one login flow through the adapter owning the route.
+ * @param provider - registered provider route to authenticate.
+ * @param type - exact authentication method selected by the user.
+ * @param interaction - surface-owned prompt and progress callbacks.
+ */
+login(provider: string, type: 'api_key' | 'oauth', interaction: LlmAuthInteraction): Promise<void>
+
+/**
+ * Remove the route's provider-owned stored credential.
+ * @param provider - registered provider route to disconnect.
+ */
+logout(provider: string): Promise<void>
+
+/**
  * Resolve the retry policy captured when one provider route was registered.
  * @param provider - registered provider route to inspect.
  * @returns the provider-owned policy, with normal defaults already resolved.
@@ -870,7 +940,7 @@ async prepareCall(config: LlmCallConfig, signal?: AbortSignal): Promise<Prepared
 stream(options: GenerateOptions): AsyncIterable<StreamChunk>
 ```
 
-Source: [`packages/llm/llm/src/index.ts:284`](../../packages/llm/llm/src/index.ts)
+Source: [`packages/llm/llm/src/index.ts:313`](../../packages/llm/llm/src/index.ts)
 
 <a id="llm-events"></a>
 
@@ -919,5 +989,5 @@ Waterfall around every streaming model call (retry, replay, routing). Bound to t
 'llm/stream'(this: LlmRuntime, options: GenerateOptions, next: () => AsyncIterable<StreamChunk>): AsyncIterable<StreamChunk>
 ```
 
-Source: [`packages/llm/llm/src/index.ts:64`](../../packages/llm/llm/src/index.ts)
+Source: [`packages/llm/llm/src/index.ts:66`](../../packages/llm/llm/src/index.ts)
 <!-- END GENERATED cordis-surface -->

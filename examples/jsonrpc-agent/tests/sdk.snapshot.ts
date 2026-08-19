@@ -33,12 +33,14 @@ const testsDir = dirOf(import.meta.url)
 const snapshotsDir = join(testsDir, 'snapshots')
 const liveConfig = join(testsDir, '..', 'cordis.yml')
 const replayConfig = join(testsDir, '..', 'cordis.snapshot.yml')
+const imageReplayConfig = join(testsDir, '..', 'image.snapshot.cordis.yml')
 const minimalLiveConfig = join(testsDir, '..', 'minimal.cordis.yml')
 const minimalReplayConfig = join(testsDir, '..', 'minimal.snapshot.cordis.yml')
 const runtimeBin = fileURLToPath(new URL('../../../packages/examples/jsonrpc-demo/src/bin.ts', import.meta.url))
 const repoTsconfig = fileURLToPath(new URL('../../../tsconfig.json', import.meta.url))
 
 const MINIMAL_SYSTEM_PROMPT = 'You are the environment-selected minimal software engineer.'
+const PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
 const MINIMAL_BASH_DESCRIPTION = `Run commands in a bash shell
 * When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.
 * You don't have access to the internet via this tool.
@@ -79,6 +81,14 @@ interface SdkScenario {
   expectedToolDescriptions?: Readonly<Record<string, string>>
   /** Expected runtime-context state in the real assembled request. */
   runtimeContext?: false | { includes: readonly string[]; excludes: readonly string[] }
+  /** Exercise the assembled interactive-session JSON-RPC controls. */
+  interactiveControls?: boolean
+  /** Initial route used to prove an interactive selection changes later requests. */
+  initialModel?: string
+  /** Answer one assembled ask-user interaction during the turn. */
+  answerQuestion?: boolean
+  /** Upload a durable PNG and submit its reference in the user message. */
+  imageAttachment?: boolean
 }
 
 const SCENARIOS: SdkScenario[] = [
@@ -87,6 +97,23 @@ const SCENARIOS: SdkScenario[] = [
     prompt: 'Reply with exactly: SDK snapshot OK',
     sessionId: 'sdk-snapshot-text',
     children: 0,
+    interactiveControls: true,
+    initialModel: 'deepseek-v4-pro',
+  },
+  {
+    name: 'question-interaction',
+    prompt: 'Ask whether I am ready, then acknowledge my answer.',
+    sessionId: 'sdk-snapshot-question',
+    children: 0,
+    answerQuestion: true,
+  },
+  {
+    name: 'image-attachment',
+    prompt: 'Describe the attached image in one short sentence.',
+    sessionId: 'sdk-snapshot-image',
+    children: 0,
+    configs: { live: liveConfig, replay: imageReplayConfig },
+    imageAttachment: true,
   },
   {
     name: 'bash-tool',
@@ -141,13 +168,22 @@ async function persistedLogs(sessionsRoot: string): Promise<PersistedLog[]> {
 
 interface LoggedRequestHeader {
   type?: string
-  data?: { header?: { system?: unknown; tools?: LoggedTool[] } }
+  data?: { header?: { config?: { model?: unknown; provider?: unknown }; system?: unknown; tools?: LoggedTool[] } }
 }
 
 interface LoggedTool {
   readonly name: string
   readonly description?: unknown
   readonly parameters: { readonly required?: string[] }
+}
+
+function assembledRoute(log: PersistedLog): { model?: unknown; provider?: unknown } {
+  const event = log.content.trimEnd().split('\n')
+    .map(line => JSON.parse(line) as LoggedRequestHeader)
+    .find(candidate => candidate.type === 'request/header')
+  const config = event?.data?.header?.config
+  if (config === undefined) throw new Error('session log has no request/header config')
+  return config
 }
 
 function assembledTools(log: PersistedLog): LoggedTool[] {
@@ -231,23 +267,33 @@ async function readExpectedFile(path: string): Promise<string | MissingFile> {
  * envelopes get the session-log treatment (times zeroed, headers tokenized),
  * then every record is scrubbed like a wire frame.
  */
+function normalizeCommandIds(content: string): string {
+  return content.replace(/"commandId":"cmd-[^"]+"/gu, '"commandId":"{{commandId}}"')
+}
+
+function normalizeInteractionIds(content: string): string {
+  return content.replace(/"requestId":"[^"]+"/gu, '"requestId":"{{requestId}}"')
+}
+
 function normalizeNotifications(notifications: readonly HarnessNotification[], ctx: NormalizeContext): string {
   const events = notifications
     .filter(n => n.method === 'session.event')
     .map(n => n.params.event as Record<string, unknown>)
   const normalizedEvents = events.length === 0
     ? []
-    : scrubRequestHeaders(normalizeSessionLog(
+    : normalizeCommandIds(scrubRequestHeaders(normalizeSessionLog(
       `${events.map(event => JSON.stringify(event)).join('\n')}\n`,
       ctx,
-    )).trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+    ))).trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
   let eventIndex = 0
   const records = notifications.map((notification) => {
     if (notification.method !== 'session.event') return { method: notification.method, params: notification.params }
     const event = normalizedEvents[eventIndex++]
     return { method: notification.method, params: { ...notification.params, event } }
   })
-  return normalizeStdout(`${records.map(record => JSON.stringify(record)).join('\n')}\n`, ctx)
+  return normalizeInteractionIds(
+    normalizeStdout(`${records.map(record => JSON.stringify(record)).join('\n')}\n`, ctx),
+  )
 }
 
 /** Normalize the owned-run projection. */
@@ -264,6 +310,7 @@ async function runScenario(scenario: SdkScenario): Promise<{
   notifications: HarnessNotification[]
   logs: PersistedLog[]
   observedFiles: Record<string, string | MissingFile>
+  controls: object | undefined
   cwd: string
 }> {
   const cwd = await mkdtemp(join(tmpdir(), `sdk-snapshot-${scenario.name}-`))
@@ -282,6 +329,7 @@ async function runScenario(scenario: SdkScenario): Promise<{
       ? scenario.configs?.live ?? liveConfig
       : scenario.configs?.replay ?? replayConfig,
     DSH_SESSION_ROOT: sessionsRoot,
+    DSH_HOME: cwd,
     DSH_CWD: cwd,
     DSH_SNAPSHOT: mode,
     NODE_OPTIONS: [process.env.NODE_OPTIONS, '--disable-warning=ExperimentalWarning'].filter(Boolean).join(' '),
@@ -302,14 +350,69 @@ async function runScenario(scenario: SdkScenario): Promise<{
     },
     cwd,
     provider: 'deepseek-official',
-    model: 'deepseek-v4-flash',
+    model: scenario.initialModel ?? 'deepseek-v4-flash',
   })
   try {
     const notifications: HarnessNotification[] = []
-    const result = await harness.run(scenario.prompt.replaceAll('{{cwd}}', cwd), {
+    let controls: object | undefined
+    if (scenario.interactiveControls === true) {
+      await harness.start()
+      const catalog = await harness.client.catalog()
+      const selected = await harness.client.selectModel(
+        scenario.sessionId, 'deepseek-official', 'deepseek-v4-flash',
+      )
+      const commands = await harness.client.listCommands(scenario.sessionId)
+      const command = await harness.client.executeCommand(scenario.sessionId, '/compact')
+      const stableCommand = 'commandId' in command
+        ? { ...command, commandId: '{{commandId}}' }
+        : command
+      controls = { catalog, selected, commands, command: stableCommand }
+    }
+    let interactionResponse: Promise<unknown> | undefined
+    let input: string | Array<{ type: 'text'; text: string } | { type: 'image'; attachment: Awaited<ReturnType<typeof harness.saveImage>> }>
+    if (scenario.imageAttachment === true) {
+      const limits = await harness.imageLimits()
+      const attachment = await harness.saveImage(Buffer.from(PNG_BASE64, 'base64'), 'image/png', 'pixel.png')
+      controls = { imageLimits: limits, attachment }
+      input = [
+        { type: 'text', text: scenario.prompt.replaceAll('{{cwd}}', cwd) },
+        { type: 'image', attachment },
+      ]
+    } else {
+      input = scenario.prompt.replaceAll('{{cwd}}', cwd)
+    }
+    const result = await harness.run(input, {
       sessionId: scenario.sessionId,
-      onNotification: (notification) => { notifications.push(notification) },
+      onNotification: (notification) => {
+        notifications.push(notification)
+        if (scenario.answerQuestion !== true || notification.method !== 'interaction.requested') return
+        if (notification.params.kind !== 'question' || typeof notification.params.requestId !== 'string') return
+        interactionResponse = harness.client.respondQuestion(notification.params.requestId, {
+          answers: [{ id: 'ready', selected: ['Yes'] }],
+        })
+      },
     })
+    if (scenario.answerQuestion === true) {
+      if (interactionResponse === undefined) throw new Error('assembled question scenario emitted no interaction request')
+      controls = { interactionResponse: await interactionResponse }
+    }
+    if (scenario.interactiveControls === true) {
+      const history = await harness.client.sessionHistory(scenario.sessionId)
+      const sessions = await harness.client.listSessions()
+      const sessionClosed = await harness.client.closeSession(scenario.sessionId)
+      const resumed = await harness.client.resumeSession(scenario.sessionId)
+      const resumedHistory = await harness.client.sessionHistory(scenario.sessionId)
+      controls = {
+        ...controls,
+        cancelRequested: await harness.client.cancelSession(scenario.sessionId),
+        sessionIds: sessions.sessions.map(entry => entry.header.id),
+        historyEventCount: history.events.length,
+        sessionClosed,
+        resumed,
+        resumedHistoryEventCount: resumedHistory.events.length,
+        resumedClosed: await harness.client.closeSession(scenario.sessionId),
+      }
+    }
     await harness.close()
     const logs = await persistedLogs(sessionsRoot)
     const observedFiles = Object.fromEntries(await Promise.all(
@@ -318,7 +421,7 @@ async function runScenario(scenario: SdkScenario): Promise<{
         await readExpectedFile(join(cwd, path)),
       ]),
     ))
-    return { result, notifications, logs, observedFiles, cwd }
+    return { result, notifications, logs, observedFiles, controls, cwd }
   } finally {
     await harness.close()
     await rm(cwd, { recursive: true, force: true })
@@ -349,8 +452,9 @@ describe('TypeScript SDK snapshots over the jsonrpc runtime', () => {
       const scenarioDir = join(snapshotsDir, scenario.name)
       const notificationsExpectedPath = join(scenarioDir, 'notifications.expected.jsonl')
       const resultExpectedPath = join(scenarioDir, 'result.expected.json')
+      const controlsExpectedPath = join(scenarioDir, 'controls.expected.json')
 
-      const { result, notifications, logs, observedFiles, cwd } = await runScenario(scenario)
+      const { result, notifications, logs, observedFiles, controls, cwd } = await runScenario(scenario)
       const ordered = orderLogs(logs, scenario)
       const actualContext = contextOf(ordered, cwd)
       const files = fixtureFiles(scenario)
@@ -407,8 +511,8 @@ describe('TypeScript SDK snapshots over the jsonrpc runtime', () => {
       for (const [index, log] of ordered.entries()) {
         const expected = expectedContents[index]
         if (expected === undefined) throw new Error(`no fixture for persisted log ${index}`)
-        expect(scrubRequestHeaders(normalizeSessionLog(log.content, actualContext)))
-          .toBe(scrubRequestHeaders(normalizeSessionLog(expected, expectedContext)))
+        expect(normalizeCommandIds(scrubRequestHeaders(normalizeSessionLog(log.content, actualContext))))
+          .toBe(normalizeCommandIds(scrubRequestHeaders(normalizeSessionLog(expected, expectedContext))))
       }
 
       // The SDK-visible wire stream and turn result match their expected outputs.
@@ -417,9 +521,34 @@ describe('TypeScript SDK snapshots over the jsonrpc runtime', () => {
       if (recording || refreshing) {
         await writeFile(notificationsExpectedPath, normalizedNotifications)
         await writeFile(resultExpectedPath, normalizedResult)
+        if (controls !== undefined) await writeFile(controlsExpectedPath, `${JSON.stringify(controls)}\n`)
       }
       expect(normalizedNotifications).toBe(await readFile(notificationsExpectedPath, 'utf8'))
       expect(normalizedResult).toBe(await readFile(resultExpectedPath, 'utf8'))
+      if (controls !== undefined) expect(`${JSON.stringify(controls)}\n`).toBe(await readFile(controlsExpectedPath, 'utf8'))
+      if (scenario.imageAttachment === true) {
+        const parent = ordered[0]
+        if (parent === undefined) throw new Error(`${scenario.name} has no parent session log`)
+        const userMessage = parent.content.trimEnd().split('\n')
+          .map(line => JSON.parse(line) as { type?: string; data?: { content?: unknown[] } })
+          .find(event => event.type === 'user/message')
+        expect(userMessage?.data?.content?.some((block) => {
+          if (typeof block !== 'object' || block === null || Array.isArray(block)) return false
+          const attachment = (block as { type?: unknown; attachment?: unknown }).attachment
+          return (block as { type?: unknown }).type === 'image'
+            && typeof attachment === 'object' && attachment !== null && !Array.isArray(attachment)
+            && (attachment as { mediaType?: unknown }).mediaType === 'image/png'
+        })).toBe(true)
+      }
+      if (scenario.interactiveControls === true) {
+        const parent = ordered[0]
+        if (parent === undefined) throw new Error(`${scenario.name} has no parent session log`)
+        expect(scenario.initialModel).not.toBe('deepseek-v4-flash')
+        expect(assembledRoute(parent)).toEqual({
+          provider: 'deepseek-official',
+          model: 'deepseek-v4-flash',
+        })
+      }
 
       // Wire-shape invariants that must hold in every mode.
       expect(notifications.at(-1)).toMatchObject({

@@ -3,6 +3,11 @@
 # persistent Bash and string-replace editor tools. Runtime-context injection and
 # context compaction are absent.
 
+- id: attachments
+  name: '@deepseek-ai/dsh-attachment-local'
+  config:
+    dshHome: !!js process.env.DSH_HOME
+
 - id: sdk-jsonrpc-server
   name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
   config:

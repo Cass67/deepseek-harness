@@ -695,6 +695,41 @@ describe('provider profile lifecycle', () => {
     expect(server.requests).toHaveLength(0)
   })
 
+  it('runs provider-native API-key login through the shared credential store', async () => {
+    const adapter = adapterOf({
+      'acme-gateway': {
+        api: 'openai-completions',
+        baseURL: 'https://acme.test/v1',
+        models: [{ id: 'acme', contextWindow: 1024, maxTokens: 128 }],
+      },
+    }, undefined)
+    const notices: object[] = []
+    await adapter.login('acme-gateway', 'api_key', {
+      notify: (event) => { notices.push(event) },
+      prompt: async (prompt) => {
+        expect(prompt.type).toBe('secret')
+        return 'stored-openai-key'
+      },
+    })
+    expect(await adapter.authInfo('acme-gateway')).toMatchObject({
+      provider: 'acme-gateway',
+      configured: true,
+      credentialType: 'api_key',
+    })
+    expect(JSON.stringify(notices)).not.toContain('stored-openai-key')
+    await adapter.logout('acme-gateway')
+    expect(await adapter.authInfo('acme-gateway')).toMatchObject({ configured: false })
+  })
+
+  it('does not offer native login over an explicit credential reference', async () => {
+    const adapter = adapterOf({ openai: { apiKeyEnv: 'OPENAI_DEPLOYMENT_KEY' } }, undefined)
+    expect((await adapter.authInfo('openai')).methods).toEqual([])
+    await expect(adapter.login('openai', 'api_key', {
+      notify: () => undefined,
+      prompt: () => Promise.resolve('not-stored'),
+    })).rejects.toMatchObject({ code: 'AUTH_UNAVAILABLE' })
+  })
+
   it('validates empty, underspecified, legacy-shaped, and explicitly blank profiles', () => {
     // Empty and omitted dicts are the dormant zero-route posture, not errors.
     expect(resolveProfiles({}).size).toBe(0)

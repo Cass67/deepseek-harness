@@ -1,15 +1,28 @@
 from __future__ import annotations
 
-import json
 import inspect
+import json
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-
-from deepseek_harness import DeepSeekHarness, HarnessClient, HarnessConfig, Notification, SdkProtocolError
+from deepseek_harness import (
+    CommandExecutionResponse,
+    CommandListResponse,
+    DeepSeekHarness,
+    HarnessClient,
+    HarnessConfig,
+    ModelCatalogReasoning,
+    Notification,
+    ProviderAuthEventNotification,
+    ProviderAuthPromptNotification,
+    SdkProtocolError,
+    SessionHistoryResponse,
+)
+from pydantic import ValidationError
 
 
 def test_high_level_sdk_runs_turn_and_collects_final_response(tmp_path: Path) -> None:
@@ -18,6 +31,7 @@ def test_high_level_sdk_runs_turn_and_collects_final_response(tmp_path: Path) ->
     init_dump = tmp_path / "init.json"
     script.write_text(
         """
+import base64
 import json
 import os
 import sys
@@ -37,6 +51,24 @@ for line in sys.stdin:
     if method == "initialize":
         json.dump(msg.get("params"), open(os.environ["INIT_DUMP"], "w"))
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"serverInfo": {"name": "fake-runtime"}}}), flush=True)
+    elif method == "attachment/imageLimits":
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {
+            "maxImageBytes": 1024,
+            "maxImagesPerMessage": 4,
+            "maxMessageImageBytes": 4096,
+            "maxImagePixels": 1000000,
+            "mediaTypes": ["image/png", "image/jpeg"],
+        }}), flush=True)
+    elif method == "attachment/saveImage":
+        params = msg.get("params") or {}
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {
+            "attachmentId": "fake:attachment-1",
+            "mediaType": params["mediaType"],
+            "bytes": len(base64.b64decode(params["data"], validate=True)),
+            "width": 1,
+            "height": 1,
+            **({"name": params["name"]} if "name" in params else {}),
+        }}), flush=True)
     elif method == "session/prompt":
         params = msg.get("params") or {}
         print(json.dumps({"jsonrpc": "2.0", "method": "session.event", "params": {"sessionId": params["sessionId"], "event": {"type": "agent/inbox/spliced", "data": {"target": "next-turn", "start": 0, "inserted": [{"id": "message-1"}]}}}}), flush=True)
@@ -105,8 +137,16 @@ for line in sys.stdin:
             "DEEPSEEK_BASE_URL": "http://127.0.0.1:4321",
         },
     ) as harness:
+        limits = harness.image_limits()
+        named_attachment = harness.save_image(b"png", "image/png", "pixel.png")
+        unnamed_attachment = harness.save_image(b"x", "image/png")
         result = harness.run("say hello", session_id="main")
 
+    assert limits.max_image_bytes == 1024
+    assert named_attachment.attachment_id == "fake:attachment-1"
+    assert named_attachment.bytes == 3
+    assert named_attachment.name == "pixel.png"
+    assert unnamed_attachment.name is None
     assert result.final_response == "hello from runtime"
     assert result.finish_reason == "max-tokens"
     assert result.events[-1]["type"] == "turn/end"
@@ -991,6 +1031,439 @@ def test_client_respects_explicit_config_over_bundled_default(
         client.initialize(provider="deepseek-official", cwd="/workspace", model="deepseek-v4-pro")
 
     assert json.loads(env_dump.read_text())["DSH_CORDIS_CONFIG"] == "./explicit.yml"
+
+
+def _interactive_runtime(
+    tmp_path: Path,
+    malformed: bool = False,
+    mismatched_resume: bool = False,
+    mismatched_attachment: bool = False,
+) -> tuple[str, ...]:
+    script = tmp_path / (
+        "interactive_malformed.py" if malformed else "interactive.py"
+    )
+    header = {
+        "version": 0,
+        "id": "saved",
+        "createdAt": 7,
+        "cwd": "/workspace",
+        "parentSession": "parent",
+        "seedLength": 0,
+        "origin": "subagent",
+        "delegationDepth": 1,
+        "agentPreset": "worker",
+    }
+    valid = {
+        "attachment/imageLimits": {
+            "maxImageBytes": 1024,
+            "maxImagesPerMessage": 4,
+            "maxMessageImageBytes": 4096,
+            "maxImagePixels": 1_000_000,
+            "mediaTypes": ["image/png", "image/jpeg"],
+        },
+        "attachment/saveImage": {
+            "attachmentId": "fake:attachment-1",
+            "mediaType": "image/png",
+            "bytes": 4 if mismatched_attachment else 3,
+            "width": 1,
+            "height": 1,
+            "name": "pixel.png",
+        },
+        "llm/catalog": {
+            "providers": [
+                {
+                    "id": "p",
+                    "name": "Provider",
+                    "models": [
+                        {
+                            "id": "m",
+                            "name": "Model",
+                            "inputModalities": ["text"],
+                            "reasoning": {
+                                "efforts": [
+                                    {"id": "low", "name": "Low"},
+                                    {"id": "high", "name": "High"},
+                                ],
+                                "defaultEffort": "high",
+                            },
+                        }
+                    ],
+                }
+            ],
+            "failures": [],
+        },
+        "provider/authInfo": {
+            "provider": "p",
+            "methods": [
+                {"type": "api_key", "label": "API key"},
+                {"type": "oauth", "label": "Subscription"},
+            ],
+            "configured": False,
+        },
+        "provider/authStart": {"flowId": "flow"},
+        "provider/authRespond": {"accepted": True},
+        "provider/authCancel": {"requested": True},
+        "provider/authLogout": {"disconnected": True},
+        "session/list": {
+            "sessions": [{"header": header, "live": False, "persisted": True}]
+        },
+        "session/history": {
+            "session": header,
+            "events": [
+                {"type": "turn/start", "seq": 0, "time": 8, "data": {"turn": 1}}
+            ],
+        },
+        "session/resume": {"sessionId": "other" if mismatched_resume else "saved"},
+        "interaction/respond": {"accepted": True},
+        "session/selectModel": {
+            "provider": "p",
+            "model": "m",
+            "reasoningEffort": "high",
+        },
+        "session/cancel": {"requested": True},
+        "session/close": {"closed": True},
+        "command/list": {
+            "available": True,
+            "commands": [{"name": "compact", "description": "Compact"}],
+        },
+        "command/execute": {
+            "outcome": "success",
+            "commandId": "cmd-1",
+            "text": "done",
+        },
+        "shutdown": {},
+    }
+    invalid = {
+        "attachment/imageLimits": {
+            "maxImageBytes": "large",
+            "maxImagesPerMessage": 4,
+            "maxMessageImageBytes": 4096,
+            "maxImagePixels": 1_000_000,
+            "mediaTypes": ["image/png"],
+        },
+        "attachment/saveImage": {
+            "attachmentId": "",
+            "mediaType": "image/png",
+            "bytes": 3,
+            "width": 0,
+            "height": 1,
+        },
+        "llm/catalog": {"providers": "bad", "failures": []},
+        "provider/authInfo": {
+            "provider": "",
+            "methods": [{"type": "wat", "label": ""}],
+            "configured": "no",
+        },
+        "provider/authStart": {"flowId": ""},
+        "provider/authRespond": {"accepted": "yes"},
+        "provider/authCancel": {"requested": "yes"},
+        "provider/authLogout": {"disconnected": False},
+        "session/list": {
+            "sessions": [
+                {
+                    "header": {"version": 0, "id": "saved", "createdAt": True},
+                    "live": 1,
+                    "persisted": True,
+                }
+            ]
+        },
+        "session/history": {"session": {}, "events": []},
+        "session/resume": {"sessionId": 7},
+        "interaction/respond": {"accepted": "yes"},
+        "session/selectModel": {"provider": 7},
+        "session/cancel": {"requested": "yes"},
+        "session/close": {},
+        "command/list": {"available": True, "commands": [{"name": 1}]},
+        "command/execute": {"outcome": "success"},
+        "shutdown": {},
+    }
+    script.write_text(
+        f"""
+import json
+import sys
+
+malformed = {malformed!r}
+valid = {valid!r}
+invalid = {invalid!r}
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    result = (invalid if malformed else valid)[method]
+    print(json.dumps({{"jsonrpc": "2.0", "id": msg["id"], "result": result}}), flush=True)
+    if method == "shutdown":
+        break
+""".strip()
+    )
+    return (sys.executable, str(script))
+
+
+def test_provider_auth_notification_models_are_strict() -> None:
+    with pytest.raises(ValidationError):
+        ProviderAuthPromptNotification.model_validate({
+            "flowId": "flow", "provider": "p", "promptId": "prompt",
+            "prompt": {"type": "secret", "message": "Key", "options": []},
+        })
+    with pytest.raises(ValidationError):
+        ProviderAuthPromptNotification.model_validate({
+            "flowId": "flow", "provider": "p", "promptId": "prompt",
+            "prompt": {"type": "select", "message": "Account", "placeholder": "bad", "options": [
+                {"id": "one", "label": "One"},
+            ]},
+        })
+    with pytest.raises(ValidationError):
+        ProviderAuthPromptNotification.model_validate({
+            "flowId": "flow", "provider": "p", "promptId": "prompt",
+            "prompt": {"type": "secret", "message": "Key", "options": None},
+        })
+    with pytest.raises(ValidationError):
+        ProviderAuthPromptNotification.model_validate({
+            "flowId": "flow", "provider": "p", "promptId": "prompt",
+            "prompt": {"type": "secret", "message": "Key", "placeholder": None},
+        })
+    with pytest.raises(ValidationError):
+        ProviderAuthPromptNotification.model_validate({
+            "flowId": "flow", "provider": "p", "promptId": "prompt",
+            "prompt": {"type": "select", "message": "Account", "options": [
+                {"id": "one", "label": "One", "description": None},
+            ]},
+        })
+    with pytest.raises(ValidationError):
+        ProviderAuthEventNotification.model_validate({
+            "flowId": "flow", "provider": "p",
+            "event": {"type": "auth_url", "url": "https://example.test", "secret": "bad"},
+        })
+    with pytest.raises(ValidationError):
+        ProviderAuthEventNotification.model_validate({
+            "flowId": "flow", "provider": "p",
+            "event": {"type": "info", "message": "Choose", "links": [{"url": ""}]},
+        })
+    with pytest.raises(ValidationError):
+        ProviderAuthEventNotification.model_validate({
+            "flowId": "flow", "provider": "p",
+            "event": {"type": "info", "message": "Choose", "links": None},
+        })
+    with pytest.raises(ValidationError):
+        ProviderAuthEventNotification.model_validate({
+            "flowId": "flow", "provider": "p",
+            "event": {
+                "type": "device_code", "userCode": "code", "verificationUri": "https://example.test",
+                "intervalSeconds": True,
+            },
+        })
+
+
+def test_catalog_reasoning_rejects_invalid_efforts() -> None:
+    with pytest.raises(ValidationError, match="at least 1 character"):
+        ModelCatalogReasoning.model_validate({"efforts": [{"id": "", "name": "Empty"}]})
+    with pytest.raises(ValidationError, match="must be unique"):
+        ModelCatalogReasoning.model_validate(
+            {"efforts": [{"id": "low", "name": "Low"}, {"id": "low", "name": "Low again"}]}
+        )
+    with pytest.raises(ValidationError, match="must name a supported effort"):
+        ModelCatalogReasoning.model_validate(
+            {"efforts": [{"id": "low", "name": "Low"}], "defaultEffort": "high"}
+        )
+
+
+def test_client_projects_interactive_session_controls(tmp_path: Path) -> None:
+    config = HarnessConfig(launch_args_override=_interactive_runtime(tmp_path))
+    with HarnessClient(config) as client:
+        assert client.image_limits().max_image_bytes == 1024
+        attachment = client.save_image(b"png", "image/png", "pixel.png")
+        assert attachment.attachment_id == "fake:attachment-1"
+        assert attachment.name == "pixel.png"
+        auth_info = client.provider_auth_info("p")
+        assert [method.type for method in auth_info.methods] == ["api_key", "oauth"]
+        assert client.start_provider_auth("p", "oauth").flow_id == "flow"
+        assert client.respond_provider_auth("flow", "prompt", "secret").accepted is True
+        assert client.cancel_provider_auth("flow").requested is True
+        assert client.logout_provider("p").disconnected is True
+        model = client.list_models().providers[0].models[0]
+        assert model.input_modalities == ["text"]
+        assert model.reasoning is not None
+        assert [effort.id for effort in model.reasoning.efforts] == ["low", "high"]
+        assert model.reasoning.default_effort == "high"
+        assert client.list_sessions().sessions[0].header.id == "saved"
+        history = client.session_history("saved")
+        assert history.events[0].type == "turn/start"
+        assert history.session.agent_preset == "worker"
+        assert client.resume_session("saved").session_id == "saved"
+        assert client.respond_approval("a", "allowed-once").accepted is True
+        assert client.respond_question("q", [{"id": "q", "selected": ["yes"]}]).accepted is True
+        assert client.cancel_question("q").accepted is True
+        assert client.select_model("main", "p", "m", "high").reasoning_effort == "high"
+        assert client.cancel_session("main") is True
+        assert client.close_session("main") is True
+        assert client.list_commands("main").commands[0].name == "compact"
+        assert client.execute_command("main", "/compact").command_id == "cmd-1"
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda client: client.image_limits(),
+        lambda client: client.save_image(b"png", "image/png"),
+        lambda client: client.list_models(),
+        lambda client: client.provider_auth_info("p"),
+        lambda client: client.start_provider_auth("p", "oauth"),
+        lambda client: client.respond_provider_auth("flow", "prompt", "secret"),
+        lambda client: client.cancel_provider_auth("flow"),
+        lambda client: client.logout_provider("p"),
+        lambda client: client.list_sessions(),
+        lambda client: client.session_history("saved"),
+        lambda client: client.resume_session("saved"),
+        lambda client: client.respond_approval("a", "allowed-once"),
+        lambda client: client.select_model("main", "p", "m"),
+        lambda client: client.cancel_session("main"),
+        lambda client: client.close_session("main"),
+        lambda client: client.list_commands("main"),
+        lambda client: client.execute_command("main", "/compact"),
+    ],
+)
+def test_client_rejects_malformed_interactive_responses(
+    tmp_path: Path, operation: Callable[[HarnessClient], object]
+) -> None:
+    with HarnessClient(
+        HarnessConfig(launch_args_override=_interactive_runtime(tmp_path, malformed=True))
+    ) as client:
+        with pytest.raises(ValidationError):
+            operation(client)
+
+
+@pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        (CommandListResponse, {"available": 1, "commands": []}),
+        (
+            CommandExecutionResponse,
+            {"outcome": "success", "commandId": "cmd", "sourceEventSeq": True},
+        ),
+        (
+            CommandExecutionResponse,
+            {"outcome": "success", "commandId": "cmd", "sourceEventSeq": -1},
+        ),
+        (
+            CommandExecutionResponse,
+            {
+                "outcome": "success",
+                "commandId": "cmd",
+                "sourceEventSeq": 9_007_199_254_740_992,
+            },
+        ),
+    ],
+)
+def test_interactive_response_models_reject_non_wire_scalar_values(
+    model: type[CommandListResponse] | type[CommandExecutionResponse],
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        [{"type": 7, "seq": 0, "time": 8, "data": {}}],
+        [{"type": "turn/start", "seq": 0, "time": 8, "data": None}],
+        [
+            {"type": "turn/start", "seq": 0, "time": 8, "data": {"turn": 1}},
+            {"type": "turn/end", "seq": 2, "time": 9, "data": {"turn": 1}},
+        ],
+        [
+            {"type": "turn/start", "seq": 0, "time": 8, "data": {"turn": 1}},
+            {"type": "turn/end", "seq": 0, "time": 9, "data": {"turn": 1}},
+        ],
+    ],
+)
+def test_session_history_rejects_malformed_or_noncontiguous_events(
+    events: list[object],
+) -> None:
+    with pytest.raises(ValidationError):
+        SessionHistoryResponse.model_validate(
+            {
+                "session": {"version": 0, "id": "saved", "createdAt": 7},
+                "events": events,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "surface_op",
+    [
+        None,
+        [],
+        {},
+        "replace",
+        {"op": "replace", "start": 0},
+        {"op": "replace", "start": 0, "end": 1, "extra": True},
+        {"op": "replace", "start": True, "end": 1},
+        {"op": "replace", "start": -1, "end": 1},
+        {"op": "other", "start": 0, "end": 1},
+    ],
+)
+def test_session_history_rejects_null_array_or_malformed_surface_op(surface_op: object) -> None:
+    with pytest.raises(ValidationError):
+        SessionHistoryResponse.model_validate(
+            {
+                "session": {"version": 0, "id": "saved", "createdAt": 7},
+                "events": [
+                    {
+                        "type": "turn/start",
+                        "seq": 0,
+                        "time": 8,
+                        "data": {"turn": 1},
+                        "surfaceOp": surface_op,
+                    }
+                ],
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "surface_op",
+    ["append", {"op": "replace", "start": 0, "end": 9_007_199_254_740_991}],
+)
+def test_session_history_accepts_typescript_surface_op_variants(surface_op: object) -> None:
+    history = SessionHistoryResponse.model_validate(
+        {
+            "session": {"version": 0, "id": "saved", "createdAt": 7},
+            "events": [
+                {
+                    "type": "turn/start",
+                    "seq": 0,
+                    "time": 8,
+                    "data": {"turn": 1},
+                    "surfaceOp": surface_op,
+                }
+            ],
+        }
+    )
+    assert history.events[0].surface_op is not None
+
+
+def test_client_rejects_mismatched_resume_identity(tmp_path: Path) -> None:
+    launch = _interactive_runtime(tmp_path, mismatched_resume=True)
+    with HarnessClient(HarnessConfig(launch_args_override=launch)) as client:
+        with pytest.raises(SdkProtocolError, match="session/resume returned 'other'"):
+            client.resume_session("saved")
+
+
+def test_client_rejects_mismatched_attachment_reference(tmp_path: Path) -> None:
+    launch = _interactive_runtime(tmp_path, mismatched_attachment=True)
+    with HarnessClient(HarnessConfig(launch_args_override=launch)) as client:
+        with pytest.raises(SdkProtocolError, match="does not match requested bytes/media type"):
+            client.save_image(b"png", "image/png")
+
+
+def test_command_source_event_sequence_accepts_javascript_safe_integer_limit() -> None:
+    response = CommandExecutionResponse.model_validate(
+        {
+            "outcome": "success",
+            "commandId": "cmd",
+            "sourceEventSeq": 9_007_199_254_740_991,
+        }
+    )
+    assert response.source_event_seq == 9_007_199_254_740_991
 
 
 def test_client_reports_missing_bundled_runtime_dependency(monkeypatch: pytest.MonkeyPatch) -> None:

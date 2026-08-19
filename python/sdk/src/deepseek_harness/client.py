@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import queue
@@ -10,12 +11,35 @@ import uuid
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, TypeAlias, TypeVar
+from typing import Callable, Literal, TypeAlias, TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 
-from .errors import JsonRpcError, TransportClosedError
-from .models import IncomingRequest, InitializeResponse, JsonObject, JsonValue, Notification
+from .errors import JsonRpcError, SdkProtocolError, TransportClosedError
+from .models import (
+    PROVIDER_AUTH_NOTIFICATION_MODELS,
+    CommandExecutionResponse,
+    CommandListResponse,
+    ImageAttachmentLimits,
+    ImageAttachmentRef,
+    ImageMediaType,
+    IncomingRequest,
+    InitializeResponse,
+    InteractionResponseReceipt,
+    JsonObject,
+    JsonValue,
+    ModelCatalogResponse,
+    ModelSelectionResponse,
+    Notification,
+    ProviderAuthCancelResponse,
+    ProviderAuthInfoResponse,
+    ProviderAuthLogoutResponse,
+    ProviderAuthResponseReceipt,
+    ProviderAuthStartResponse,
+    SessionHistoryResponse,
+    SessionListResponse,
+    SessionResumeResponse,
+)
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 NotificationFilter: TypeAlias = Callable[[Notification], bool]
@@ -134,6 +158,186 @@ class HarnessClient:
         except BaseException:
             self.close()
             raise
+
+    def list_models(self) -> ModelCatalogResponse:
+        """Return healthy provider catalogs plus independent provider failures."""
+        return self.request("llm/catalog", None, response_model=ModelCatalogResponse)
+
+    def provider_auth_info(self, provider: str) -> ProviderAuthInfoResponse:
+        """Return non-secret provider-native authentication state."""
+        response = self.request(
+            "provider/authInfo", {"provider": provider}, response_model=ProviderAuthInfoResponse
+        )
+        if response.provider != provider:
+            raise SdkProtocolError("provider/authInfo returned a different provider")
+        return response
+
+    def start_provider_auth(
+        self, provider: str, auth_type: Literal["api_key", "oauth"]
+    ) -> ProviderAuthStartResponse:
+        """Start one asynchronous provider-native authentication flow."""
+        return self.request(
+            "provider/authStart",
+            {"provider": provider, "type": auth_type},
+            response_model=ProviderAuthStartResponse,
+        )
+
+    def respond_provider_auth(
+        self, flow_id: str, prompt_id: str, value: str
+    ) -> ProviderAuthResponseReceipt:
+        """Respond to one pending provider authentication prompt."""
+        return self.request(
+            "provider/authRespond",
+            {"flowId": flow_id, "promptId": prompt_id, "value": value},
+            response_model=ProviderAuthResponseReceipt,
+        )
+
+    def cancel_provider_auth(self, flow_id: str) -> ProviderAuthCancelResponse:
+        """Cancel one provider authentication flow."""
+        return self.request(
+            "provider/authCancel", {"flowId": flow_id}, response_model=ProviderAuthCancelResponse
+        )
+
+    def logout_provider(self, provider: str) -> ProviderAuthLogoutResponse:
+        """Remove one provider-owned stored credential."""
+        return self.request(
+            "provider/authLogout", {"provider": provider}, response_model=ProviderAuthLogoutResponse
+        )
+
+    def image_limits(self) -> ImageAttachmentLimits:
+        """Return deployment-resolved image upload limits."""
+        return self.request(
+            "attachment/imageLimits", None, response_model=ImageAttachmentLimits
+        )
+
+    def save_image(
+        self,
+        data: bytes,
+        media_type: ImageMediaType,
+        name: str | None = None,
+    ) -> ImageAttachmentRef:
+        """Save encoded image bytes and return their durable reference."""
+        payload: JsonObject = {
+            "data": base64.b64encode(data).decode("ascii"),
+            "mediaType": media_type,
+        }
+        if name is not None:
+            payload["name"] = name
+        response = self.request(
+            "attachment/saveImage", payload, response_model=ImageAttachmentRef
+        )
+        if response.bytes != len(data) or response.media_type != media_type:
+            raise SdkProtocolError(
+                "attachment/saveImage returned a reference that does not match requested bytes/media type"
+            )
+        return response
+
+    def list_sessions(self) -> SessionListResponse:
+        """List live and durable sessions through the runtime query service."""
+        return self.request("session/list", None, response_model=SessionListResponse)
+
+    def session_history(self, session_id: str) -> SessionHistoryResponse:
+        """Read one complete durable session log without resuming it."""
+        response = self.request(
+            "session/history",
+            {"sessionId": session_id},
+            response_model=SessionHistoryResponse,
+        )
+        if response.session.id != session_id:
+            raise SdkProtocolError(
+                f"session/history returned {response.session.id!r} for requested {session_id!r}"
+            )
+        return response
+
+    def resume_session(self, session_id: str) -> SessionResumeResponse:
+        """Explicitly resume one persisted session."""
+        response = self.request(
+            "session/resume",
+            {"sessionId": session_id},
+            response_model=SessionResumeResponse,
+        )
+        if response.session_id != session_id:
+            raise SdkProtocolError(
+                f"session/resume returned {response.session_id!r} for requested {session_id!r}"
+            )
+        return response
+
+    def respond_approval(
+        self, request_id: str, outcome: Literal["allowed-once", "rejected"]
+    ) -> InteractionResponseReceipt:
+        """Answer one pending approval request."""
+        return self.request(
+            "interaction/respond",
+            {"requestId": request_id, "kind": "approval", "outcome": outcome},
+            response_model=InteractionResponseReceipt,
+        )
+
+    def respond_question(
+        self, request_id: str, answers: list[JsonObject]
+    ) -> InteractionResponseReceipt:
+        """Answer one pending user-question batch."""
+        return self.request(
+            "interaction/respond",
+            {"requestId": request_id, "kind": "question", "answer": {"answers": answers}},
+            response_model=InteractionResponseReceipt,
+        )
+
+    def cancel_question(self, request_id: str) -> InteractionResponseReceipt:
+        """Cancel one pending user-question batch."""
+        return self.request(
+            "interaction/respond",
+            {"requestId": request_id, "kind": "question-cancelled"},
+            response_model=InteractionResponseReceipt,
+        )
+
+    def select_model(
+        self,
+        session_id: str,
+        provider: str,
+        model: str,
+        reasoning_effort: str | None = None,
+    ) -> ModelSelectionResponse:
+        """Select a validated route for subsequent steps in one session."""
+        payload: JsonObject = {"sessionId": session_id, "provider": provider, "model": model}
+        if reasoning_effort is not None:
+            payload["reasoningEffort"] = reasoning_effort
+        return self.request(
+            "session/selectModel", payload, response_model=ModelSelectionResponse
+        )
+
+    def cancel_session(self, session_id: str) -> bool:
+        """Request current activity cancellation without awaiting idle convergence."""
+        response = self.request(
+            "session/cancel",
+            {"sessionId": session_id},
+            response_model=_SessionCancelResponse,
+        )
+        return response.requested
+
+    def close_session(self, session_id: str) -> bool:
+        """Close one runtime-owned session after it reaches quiescence."""
+        response = self.request(
+            "session/close",
+            {"sessionId": session_id},
+            response_model=_SessionCloseResponse,
+        )
+        return response.closed
+
+    def list_commands(self, session_id: str) -> CommandListResponse:
+        """List commands effective for one session."""
+        return self.request(
+            "command/list",
+            {"sessionId": session_id},
+            response_model=CommandListResponse,
+        )
+
+    def execute_command(self, session_id: str, line: str) -> CommandExecutionResponse:
+        """Execute one slash command without submitting a model-visible message."""
+        return self.request(
+            "command/execute",
+            {"sessionId": session_id, "line": line},
+            response_model=CommandExecutionResponse,
+        )
 
     def session_prompt(
         self,
@@ -362,7 +566,11 @@ class HarnessClient:
             return
         if isinstance(method, str):
             params = message.get("params")
-            notification = Notification(method=method, payload=params if isinstance(params, dict) else {})
+            payload = params if isinstance(params, dict) else {}
+            auth_model = PROVIDER_AUTH_NOTIFICATION_MODELS.get(method)
+            if auth_model is not None:
+                auth_model.model_validate(payload)
+            notification = Notification(method=method, payload=payload)
             with self._lock:
                 self._record_session_relationship_locked(notification)
                 subscribers = list(self._notification_subscribers.items())
@@ -547,6 +755,14 @@ class NotificationSubscription:
 
 class _SessionPromptResponse(BaseModel):
     messageId: str
+
+
+class _SessionCancelResponse(BaseModel):
+    requested: StrictBool
+
+
+class _SessionCloseResponse(BaseModel):
+    closed: StrictBool
 
 
 class _ShutdownResponse(BaseModel):

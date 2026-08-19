@@ -17,6 +17,8 @@ import type {
   LlmModelInfo,
   LlmResolvedModelInfo,
   LlmProviderInfo,
+  LlmProviderAuthInfo,
+  LlmAuthInteraction,
   ModelModality,
   StreamChunk,
 } from './types.ts'
@@ -222,6 +224,33 @@ export abstract class LlmAdapter {
     _signal?: AbortSignal,
   ): Promise<LlmResolvedModelInfo> {
     return Promise.resolve({ provider, id: model, name: model })
+  }
+
+  /**
+   * Read non-secret authentication methods and current state for an owned route.
+   * @param provider - provider route owned by this adapter.
+   * @returns method labels and resolved configured status, never credential values.
+   */
+  authInfo(provider: string): Promise<LlmProviderAuthInfo> {
+    return Promise.resolve({ provider, methods: [], configured: false })
+  }
+
+  /**
+   * Run one provider-native login method.
+   * @param _provider - provider route owned by this adapter.
+   * @param _type - provider-offered authentication method.
+   * @param _interaction - surface-owned prompt and progress callbacks.
+   */
+  login(_provider: string, _type: 'api_key' | 'oauth', _interaction: LlmAuthInteraction): Promise<void> {
+    return Promise.reject(new LlmError('provider authentication is unavailable', 'AUTH_UNAVAILABLE'))
+  }
+
+  /**
+   * Remove one provider-owned stored credential.
+   * @param _provider - provider route owned by this adapter.
+   */
+  logout(_provider: string): Promise<void> {
+    return Promise.reject(new LlmError('provider authentication is unavailable', 'AUTH_UNAVAILABLE'))
   }
 
   /**
@@ -556,6 +585,33 @@ export class LlmRuntime extends Service {
       })
     }
     return models
+  }
+
+  /**
+   * Return non-secret provider-native authentication methods and status.
+   * @param provider - registered provider route to inspect.
+   * @returns adapter-owned method labels and configured status.
+   */
+  authInfo(provider: string): Promise<LlmProviderAuthInfo> {
+    return this.registration(provider).adapter.authInfo(provider)
+  }
+
+  /**
+   * Run one login flow through the adapter owning the route.
+   * @param provider - registered provider route to authenticate.
+   * @param type - exact authentication method selected by the user.
+   * @param interaction - surface-owned prompt and progress callbacks.
+   */
+  login(provider: string, type: 'api_key' | 'oauth', interaction: LlmAuthInteraction): Promise<void> {
+    return this.registration(provider).adapter.login(provider, type, interaction)
+  }
+
+  /**
+   * Remove the route's provider-owned stored credential.
+   * @param provider - registered provider route to disconnect.
+   */
+  logout(provider: string): Promise<void> {
+    return this.registration(provider).adapter.logout(provider)
   }
 
   /**

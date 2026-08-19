@@ -73,6 +73,7 @@ function notify(method: string, params: object): void {
   write({ jsonrpc: '2.0', method, params })
 }
 
+let authFlow: { flowId: string; promptId: string; provider: string } | undefined
 let seq = 0
 function event(sessionId: string, type: string, data: object): void {
   notify('session.event', { sessionId, event: { type, seq: seq++, time: 0, data } })
@@ -192,6 +193,150 @@ reader.on('line', (line) => {
         return
       }
       respond({ serverInfo: { name: 'deepseek-harness-sdk-runtime', version: '0.0.1' } })
+      return
+    case 'llm/catalog':
+      respond(env.FAKE_MALFORMED_CONTROLS === undefined ? {
+        providers: [{ id: 'fake', name: 'Fake Provider', models: [{
+          id: 'fake-model',
+          name: 'Fake Model',
+          inputModalities: ['text'],
+          reasoning: process.env.FAKE_MALFORMED_REASONING === '1'
+            ? { efforts: [{ id: 'low', name: 'Low' }], defaultEffort: 'high' }
+            : { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'high' },
+        }] }],
+        failures: [{ id: 'offline', name: 'Offline', message: 'offline' }],
+      } : { providers: 'invalid', failures: [] })
+      return
+    case 'provider/authInfo':
+      respond(env.FAKE_MALFORMED_AUTH === undefined ? {
+        provider: frame.params?.provider,
+        methods: [{ type: 'api_key', label: 'API key' }, { type: 'oauth', label: 'Subscription login' }],
+        configured: false,
+      } : { provider: '', methods: [{ type: 'wat', label: '' }], configured: 'no' })
+      return
+    case 'provider/authStart': {
+      const flowId = 'auth-flow'
+      const promptId = 'auth-prompt'
+      const provider = String(frame.params?.provider)
+      authFlow = { flowId, promptId, provider }
+      notify('provider.auth.prompt', {
+        flowId, provider, promptId,
+        prompt: env.FAKE_MALFORMED_AUTH === undefined
+          ? { type: 'secret', message: 'Enter key' }
+          : { type: 'secret', message: 7 },
+      })
+      respond(env.FAKE_MALFORMED_AUTH_RESULTS === undefined ? { flowId } : { flowId, extra: true })
+      return
+    }
+    case 'provider/authRespond':
+      if (authFlow) {
+        notify('provider.auth.promptResolved', { flowId: authFlow.flowId, promptId: authFlow.promptId })
+        notify('provider.auth.finished', { flowId: authFlow.flowId, provider: authFlow.provider, outcome: 'success' })
+        authFlow = undefined
+      }
+      respond(env.FAKE_MALFORMED_AUTH_RESULTS === undefined
+        ? { accepted: true }
+        : { accepted: true, value: 'must-not-pass-validation' })
+      return
+    case 'provider/authCancel':
+      respond(env.FAKE_MALFORMED_AUTH_RESULTS === undefined ? { requested: true } : { requested: true, extra: true })
+      return
+    case 'provider/authLogout':
+      respond(env.FAKE_MALFORMED_AUTH_RESULTS === undefined ? { disconnected: true } : { disconnected: true, extra: true })
+      return
+    case 'attachment/imageLimits':
+      respond(env.FAKE_MALFORMED_ATTACHMENTS === undefined ? {
+        maxImageBytes: 1024,
+        maxImagesPerMessage: 4,
+        maxMessageImageBytes: 4096,
+        maxImagePixels: 1_000_000,
+        mediaTypes: ['image/png', 'image/jpeg'],
+      } : { maxImageBytes: 'large', mediaTypes: ['image/png'] })
+      return
+    case 'attachment/saveImage': {
+      const data = frame.params?.data
+      const decoded = Buffer.from(typeof data === 'string' ? data : '', 'base64')
+      respond(env.FAKE_MALFORMED_ATTACHMENTS === undefined ? {
+        attachmentId: 'fake:attachment-1',
+        mediaType: frame.params?.mediaType,
+        bytes: decoded.byteLength + (env.FAKE_MISMATCH_ATTACHMENT === undefined ? 0 : 1),
+        width: 1,
+        height: 1,
+        ...(frame.params?.name === undefined ? {} : { name: frame.params.name }),
+      } : {
+        attachmentId: '', mediaType: frame.params?.mediaType, bytes: decoded.byteLength + 1, width: 0, height: 1,
+      })
+      return
+    }
+    case 'session/list':
+      respond({ sessions: [{
+        header: { version: 0, id: 'saved', createdAt: 7, cwd: '/tmp' },
+        live: false,
+        persisted: true,
+      }] })
+      return
+    case 'session/history': {
+      const sessionId = sessionIdOf(frame.params)
+      respond({
+        session: {
+          version: 0,
+          id: sessionId,
+          createdAt: 7,
+          cwd: '/tmp',
+          ...env.FAKE_OPTIONAL_SESSION_HEADER === undefined ? {} : {
+            parentSession: 'parent', seedLength: 0, origin: 'subagent', delegationDepth: 1, agentPreset: 'worker',
+          },
+        },
+        events: env.FAKE_MALFORMED_HISTORY !== undefined || env.FAKE_MALFORMED_HISTORY_TYPE !== undefined
+          ? [{
+            type: env.FAKE_MALFORMED_HISTORY_TYPE === undefined ? 'turn/start' : 7,
+            seq: 0,
+            time: 8,
+            data: env.FAKE_MALFORMED_HISTORY === undefined ? { turn: 1 } : null,
+          }]
+          : env.FAKE_GAPPED_HISTORY !== undefined || env.FAKE_DUPLICATE_HISTORY !== undefined
+            ? [
+              { type: 'turn/start', seq: 0, time: 8, data: { turn: 1 } },
+              {
+                type: 'turn/end',
+                seq: env.FAKE_GAPPED_HISTORY === undefined ? 0 : 2,
+                time: 9,
+                data: { turn: 1, reason: { kind: 'completed' } },
+              },
+            ]
+            : [{ type: 'turn/start', seq: 0, time: 8, data: { turn: 1 } }],
+      })
+      return
+    }
+    case 'session/resume':
+      respond({ sessionId: env.FAKE_MISMATCH_RESUME === undefined ? sessionIdOf(frame.params) : 'other' })
+      return
+    case 'interaction/respond':
+      respond({ accepted: true })
+      return
+    case 'session/selectModel':
+      respond(env.FAKE_MALFORMED_CONTROLS === undefined ? {
+        provider: frame.params?.provider,
+        model: frame.params?.model,
+        ...(frame.params?.reasoningEffort === undefined ? {} : { reasoningEffort: frame.params.reasoningEffort }),
+      } : { provider: 7, model: null })
+      return
+    case 'session/cancel':
+      respond(env.FAKE_MALFORMED_CONTROLS === undefined ? { requested: true } : { requested: 'yes' })
+      return
+    case 'session/close':
+      respond(env.FAKE_MALFORMED_CONTROLS === undefined ? { closed: true } : {})
+      return
+    case 'command/list':
+      respond(env.FAKE_MALFORMED_CONTROLS === undefined ? {
+        available: true,
+        commands: [{ name: 'compact', description: 'Compact context', input: { hint: 'instructions' } }],
+      } : { available: true, commands: [{ name: 3 }] })
+      return
+    case 'command/execute':
+      respond(env.FAKE_MALFORMED_CONTROLS === undefined ? {
+        outcome: 'success', commandId: 'cmd-fake-1', text: 'done',
+      } : { outcome: 'success' })
       return
     case 'session/prompt': {
       const sessionId = sessionIdOf(frame.params)

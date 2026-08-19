@@ -24,6 +24,7 @@
 import { createModels, getSupportedThinkingLevels } from '@earendil-works/pi-ai'
 import type {
   Api,
+  CredentialStore,
   Model,
   Models,
   ModelThinkingLevel,
@@ -42,6 +43,8 @@ import type {
   GenerateOptions,
   LlmModelInfo,
   LlmProviderInfo,
+  LlmProviderAuthInfo,
+  LlmAuthInteraction,
   LlmResolvedModelInfo,
   ReasoningEffortId as ReasoningEffortIdType,
   ResolvedRetryPolicy,
@@ -65,6 +68,8 @@ interface PiAiSnapshot {
 export interface PiAiAdapterOptions {
   /** Current validated profiles by provider route; called once per operation. */
   profiles: () => ReadonlyMap<string, ResolvedPiAiProviderProfile>
+  /** Durable provider-native credential store shared by every immutable model snapshot. */
+  credentials?: CredentialStore
   /**
    * Resolve the credential for one already-resolved profile; called once per
    * stream call and frozen for that call. `undefined` defers to the route's own
@@ -190,9 +195,22 @@ function requestHeaders(headers: Readonly<Record<string, string>> | undefined): 
  */
 export class PiAiAdapter extends LlmAdapter {
   private snapshot: PiAiSnapshot | undefined
+  private readonly credentials: CredentialStore
 
   constructor(private readonly config: PiAiAdapterOptions) {
     super()
+    const values = new Map<string, Awaited<ReturnType<CredentialStore['read']>>>()
+    this.credentials = config.credentials ?? {
+      read: provider => Promise.resolve(values.get(provider)),
+      list: () => Promise.resolve([...values.entries()].flatMap(([providerId, value]) =>
+        value === undefined ? [] : [{ providerId, type: value.type }])),
+      modify: async (provider, fn) => {
+        const next = await fn(values.get(provider))
+        if (next !== undefined) values.set(provider, next)
+        return values.get(provider)
+      },
+      delete: (provider) => { values.delete(provider); return Promise.resolve() },
+    }
   }
 
   /**
@@ -204,7 +222,7 @@ export class PiAiAdapter extends LlmAdapter {
   private current(): PiAiSnapshot {
     const profiles = this.config.profiles()
     if (this.snapshot?.profiles === profiles) return this.snapshot
-    const models: MutableModels = createModels()
+    const models: MutableModels = createModels({ credentials: this.credentials })
     for (const profile of profiles.values()) models.setProvider(profile.piProvider)
     this.snapshot = { profiles, models }
     return this.snapshot
@@ -238,6 +256,49 @@ export class PiAiAdapter extends LlmAdapter {
 
   override providerRetryPolicy(provider: string): ResolvedRetryPolicy | undefined {
     return this.current().profiles.get(provider)?.retryPolicy
+  }
+
+  override async authInfo(provider: string): Promise<LlmProviderAuthInfo> {
+    const snapshot = this.current()
+    const profile = this.profileOf(snapshot, provider)
+    const auth = profile.piProvider.auth
+    const methods = profile.apiKeyEnv === undefined
+      ? [
+        ...auth.apiKey?.login === undefined ? [] : [{ type: 'api_key' as const, label: auth.apiKey.name }],
+        ...auth.oauth === undefined ? [] : [{ type: 'oauth' as const, label: auth.oauth.loginLabel ?? auth.oauth.name }],
+      ]
+      : []
+    const checked = await snapshot.models.checkAuth(provider)
+    const stored = await this.credentials.read(provider)
+    return {
+      provider,
+      methods,
+      configured: checked !== undefined,
+      ...stored === undefined ? {} : { credentialType: stored.type },
+      ...checked?.source === undefined ? {} : { source: checked.source },
+    }
+  }
+
+  override async login(
+    provider: string,
+    type: 'api_key' | 'oauth',
+    interaction: LlmAuthInteraction,
+  ): Promise<void> {
+    const snapshot = this.current()
+    const profile = this.profileOf(snapshot, provider)
+    if (profile.apiKeyEnv !== undefined) {
+      throw new LlmError(
+        `pi-ai provider "${provider}" uses explicit credential reference ${profile.apiKeyEnv}`,
+        'AUTH_UNAVAILABLE',
+      )
+    }
+    await snapshot.models.login(provider, type, interaction)
+  }
+
+  override async logout(provider: string): Promise<void> {
+    const snapshot = this.current()
+    this.profileOf(snapshot, provider)
+    await snapshot.models.logout(provider)
   }
 
   override listModels(provider: string): Promise<readonly LlmModelInfo[]> {

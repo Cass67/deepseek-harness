@@ -61,12 +61,14 @@ import { assertUsableApiKey, LlmError } from '@deepseek-ai/dsh-llm'
 import type { AdapterRegistrationHandle, DirectoryRegistrationHandle, LlmConfigurableProvider } from '@deepseek-ai/dsh-llm'
 import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { PiAiAdapter } from './adapter.ts'
-import { catalogProviderIds, catalogProviderTakesApiKey } from './catalog.ts'
+import { catalogProviderIds } from './catalog.ts'
 import { assertServiceable, Config, resolveProfiles } from './config.ts'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { discoverModels } from './discovery.ts'
+import { PiAiCredentialStore, resolvePiAiAuthPath } from './auth-store.ts'
 
 export { PiAiAdapter } from './adapter.ts'
+export { PiAiCredentialStore, resolvePiAiAuthPath } from './auth-store.ts'
 export type { PiAiAdapterOptions } from './adapter.ts'
 export { Config } from './config.ts'
 export type {
@@ -134,14 +136,10 @@ function directoryEntries(
       declared: !catalog.has(provider),
     })
   }
-  // A provider whose only native method is OAuth leaves this adapter nothing
-  // to authenticate with, so offering it would put a card on the settings page
-  // whose own posture — no key, credentials discovered by the provider — fails
-  // every request. Catalog *membership* is unaffected, so `declare` above still
-  // answers what pi-ai ships.
-  for (const provider of catalog) {
-    if (catalogProviderTakesApiKey(provider)) declare(provider, provider)
-  }
+  // Every installed route is actionable: API-key and OAuth methods both run
+  // through the adapter's durable provider credential store. This includes
+  // OAuth-only routes such as openai-codex.
+  for (const provider of catalog) declare(provider, provider)
   for (const [provider, profile] of profiles) declare(provider, profile.displayName)
   return [...entries.values()]
 }
@@ -197,8 +195,13 @@ export function apply(ctx: Context, config: Config): void {
     )
   }
 
+  const environment = launchEnvironmentOf(ctx)
+  const authPath = resolvePiAiAuthPath(name => environment.get(name)?.value)
+  const authStore = new PiAiCredentialStore(authPath)
+
   const adapter = new PiAiAdapter({
     profiles,
+    credentials: authStore,
     resolveApiKey,
     resolveAttachments: () => ctx.get('attachments'),
     onReplayDegrade: ({ provider, model, reason }) => {

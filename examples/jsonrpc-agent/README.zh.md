@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-面向 Python SDK 内置 JSON-RPC 运行时的无人值守编码 agent（智能体）组合。它有意不加载终端 UI、控制台日志记录器、批准界面或用户交互工具，因为 stdout 属于 SDK 协议，轮次由 SDK 驱动。
+面向 Python SDK 内置 JSON-RPC 运行时的无人值守编码 agent（智能体）组合。它有意不加载终端 UI 或控制台日志记录器，因为 stdout 属于 SDK 协议。批准与用户问题等待通过关联的 SDK 通知和响应传输。
 
 面向模型的工具为：
 
@@ -10,8 +10,9 @@
 - `read`、`write` 和 `edit`
 - `subagent`，使用一个在进程内以前台方式运行的 spawn 提供方
 - `todo_write`
+- `ask_user_question`，由 SDK 客户端回答
 
-周边运行时还加载 JSONL 会话持久化和自动上下文压缩（context compaction）。`maxTokensAsSuccess` 将受 token 上限限制的模型轮次保留为已接受的评估结果，同时保留其 `max-tokens` 原因。
+周边运行时还加载位于 `DSH_HOME` 下且仅所有者可访问的持久图像附件、JSONL 会话持久化、精确会话查询读取和显式恢复、自动上下文压缩（context compaction），以及带 `/compact` 的人类命令注册表；SDK 命令执行不会进入模型可见用户消息。`maxTokensAsSuccess` 将受 token 上限限制的模型轮次保留为已接受的评估结果，同时保留其 `max-tokens` 原因。
 
 ## 运行时环境
 
@@ -20,6 +21,7 @@
 | `DEEPSEEK_API_KEY` | 传给 OpenAI 兼容宿主端点的凭据 |
 | `DEEPSEEK_BASE_URL` | `dsh-llm-deepseek` 使用的宿主端点 |
 | `DSH_CWD` | bash 和文件系统工具使用的 agent workspace |
+| `DSH_HOME` | 包含仅所有者可访问的持久图像对象的 Harness 主目录 |
 | `DSH_CONTEXT_WINDOW` | 极简变体中为 `DSH_MODEL` 目录项记录的上下文容量 |
 | `DSH_MAX_TOKENS_AS_SUCCESS` | `true`（默认）接受受 token 上限限制的结果；`false` 将其报告为错误 |
 | `DSH_MODEL` | `minimal.py` 使用的默认模型；`--model` 优先 |

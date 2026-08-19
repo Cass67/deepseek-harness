@@ -1,6 +1,13 @@
 # Unattended coding-agent deployment for the bundled dsh-jsonrpc-agent runtime.
 # stdout is reserved for JSON-RPC; do not add a console logger or terminal UI.
 
+# Durable owner-private image objects live under DSH_HOME, never the workspace
+# or session root. Omission retains attachment-local's ~/.dsh fallback.
+- id: attachments
+  name: '@deepseek-ai/dsh-attachment-local'
+  config:
+    dshHome: !!js process.env.DSH_HOME
+
 - id: sdk-jsonrpc-server
   name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
   config:
@@ -25,6 +32,17 @@
     cwd: !!js process.env.DSH_CWD ?? process.cwd()
     timeoutMs: 60000
 
+- id: commands
+  name: '@deepseek-ai/dsh-commands'
+
+- id: user-approval
+  name: '@deepseek-ai/dsh-user-approval'
+  config:
+    policy: ask
+
+- id: user-questions
+  name: '@deepseek-ai/dsh-user-questions'
+
 - id: agent-spine
   name: '@deepseek-ai/dsh-agent-spine-demo'
   config:
@@ -45,6 +63,15 @@
 
 - id: session-checkpoints
   name: '@deepseek-ai/dsh-session-checkpoint-policy'
+
+- id: session-query
+  name: '@deepseek-ai/dsh-session-query-sqlite'
+  config:
+    path: ':memory:'
+    openAt: never
+
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
 
 - id: subagent
   name: '@deepseek-ai/dsh-subagent'
@@ -87,3 +114,6 @@
     retainRatio: 0.16
     maxTokens: 8192
     compactionRetries: 1
+
+- id: command-compact
+  name: '@deepseek-ai/dsh-command-compact'

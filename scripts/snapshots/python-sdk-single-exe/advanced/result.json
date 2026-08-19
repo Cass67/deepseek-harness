@@ -1,6 +1,16 @@
 {
   "session_id": "{{parent}}",
   "final_response": "ADVANCED_EXECUTABLE_OK",
+  "controls": {
+    "provider_ids": [
+      "deepseek-official"
+    ],
+    "catalog_failures": [],
+    "commands_available": false,
+    "command_outcome": "unavailable",
+    "cancel_requested": false,
+    "session_closed": true
+  },
   "events": [
     {
       "type": "agent/inbox/spliced",
@@ -96,15 +106,15 @@
           "config": {
             "provider": "deepseek-official",
             "model": "smoke-model",
-            "maxTokens": 256000,
-            "reasoningEffort": "high"
+            "reasoningEffort": "high",
+            "maxTokens": 256000
           },
           "adapterDefaults": {
-            "reasoningEffort": true,
             "maxTokens": true
           },
           "system": "{{system}}",
           "tools": [
+            "ask_user_question",
             "cordis_define",
             "cordis_inspect_list",
             "cordis_inspect_query",
@@ -515,15 +525,15 @@
           "config": {
             "provider": "deepseek-official",
             "model": "smoke-model",
-            "maxTokens": 256000,
-            "reasoningEffort": "high"
+            "reasoningEffort": "high",
+            "maxTokens": 256000
           },
           "adapterDefaults": {
-            "reasoningEffort": true,
             "maxTokens": true
           },
           "system": "{{system}}",
           "tools": [
+            "ask_user_question",
             "cordis_define",
             "cordis_inspect_list",
             "cordis_inspect_query",
@@ -1355,15 +1365,15 @@
           "config": {
             "provider": "deepseek-official",
             "model": "smoke-model",
-            "maxTokens": 256000,
-            "reasoningEffort": "high"
+            "reasoningEffort": "high",
+            "maxTokens": 256000
           },
           "adapterDefaults": {
-            "reasoningEffort": true,
             "maxTokens": true
           },
           "system": "{{system}}",
           "tools": [
+            "ask_user_question",
             "cordis_define",
             "cordis_inspect_list",
             "cordis_inspect_query",
@@ -1392,7 +1402,7 @@
         "chunk": {
           "type": "block-start",
           "index": 0,
-          "blockType": "text"
+          "blockType": "tool-call"
         }
       }
     },
@@ -1404,9 +1414,11 @@
         "turn": 1,
         "step": 7,
         "chunk": {
-          "type": "text-delta",
+          "type": "tool-call-delta",
           "index": 0,
-          "text": "ADVANCED_EXECUTABLE_OK"
+          "id": "advanced-question",
+          "name": "ask_user_question",
+          "argumentsDelta": "{\"questions\": [{\"id\": \"ready\", \"question\": \"Ready to finish?\", \"header\": \"Checkpoint\", \"options\": [{\"label\": \"Yes\"}, {\"label\": \"No\"}]}]}"
         }
       }
     },
@@ -1421,8 +1433,10 @@
           "type": "block-end",
           "index": 0,
           "block": {
-            "type": "text",
-            "text": "ADVANCED_EXECUTABLE_OK"
+            "type": "tool-call",
+            "id": "advanced-question",
+            "name": "ask_user_question",
+            "arguments": "{\"questions\": [{\"id\": \"ready\", \"question\": \"Ready to finish?\", \"header\": \"Checkpoint\", \"options\": [{\"label\": \"Yes\"}, {\"label\": \"No\"}]}]}"
           }
         }
       }
@@ -1453,7 +1467,7 @@
         "chunk": {
           "type": "finish",
           "reason": {
-            "kind": "stop"
+            "kind": "tool-calls"
           }
         }
       }
@@ -1469,8 +1483,10 @@
           "role": "assistant",
           "content": [
             {
-              "type": "text",
-              "text": "ADVANCED_EXECUTABLE_OK"
+              "type": "tool-call",
+              "id": "advanced-question",
+              "name": "ask_user_question",
+              "arguments": "{\"questions\": [{\"id\": \"ready\", \"question\": \"Ready to finish?\", \"header\": \"Checkpoint\", \"options\": [{\"label\": \"Yes\"}, {\"label\": \"No\"}]}]}"
             }
           ],
           "source": {
@@ -1495,8 +1511,54 @@
       "surfaceOp": "append"
     },
     {
-      "type": "step/end",
+      "type": "tool/call",
       "seq": 82,
+      "time": 0,
+      "data": {
+        "turn": 1,
+        "step": 7,
+        "callId": "advanced-question",
+        "name": "ask_user_question",
+        "arguments": "{\"questions\": [{\"id\": \"ready\", \"question\": \"Ready to finish?\", \"header\": \"Checkpoint\", \"options\": [{\"label\": \"Yes\"}, {\"label\": \"No\"}]}]}"
+      }
+    },
+    {
+      "type": "tool/result",
+      "seq": 83,
+      "time": 0,
+      "data": {
+        "turn": 1,
+        "step": 7,
+        "message": {
+          "source": {
+            "kind": "tool",
+            "callId": "advanced-question"
+          },
+          "content": [
+            {
+              "type": "tool-result",
+              "toolCallId": "advanced-question",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"answers\":[{\"id\":\"ready\",\"selected\":[\"Yes\"]}]}"
+                }
+              ],
+              "isError": false
+            }
+          ],
+          "role": "user",
+          "id": "{{messageId}}"
+        }
+      },
+      "sourceEventSeqs": [
+        82
+      ],
+      "surfaceOp": "append"
+    },
+    {
+      "type": "step/end",
+      "seq": 84,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1504,8 +1566,138 @@
       }
     },
     {
+      "type": "step/start",
+      "seq": 85,
+      "time": 0,
+      "data": {
+        "turn": 1,
+        "step": 8
+      }
+    },
+    {
+      "type": "assistant/chunk",
+      "seq": 86,
+      "time": 0,
+      "data": {
+        "turn": 1,
+        "step": 8,
+        "chunk": {
+          "type": "block-start",
+          "index": 0,
+          "blockType": "text"
+        }
+      }
+    },
+    {
+      "type": "assistant/chunk",
+      "seq": 87,
+      "time": 0,
+      "data": {
+        "turn": 1,
+        "step": 8,
+        "chunk": {
+          "type": "text-delta",
+          "index": 0,
+          "text": "ADVANCED_EXECUTABLE_OK"
+        }
+      }
+    },
+    {
+      "type": "assistant/chunk",
+      "seq": 88,
+      "time": 0,
+      "data": {
+        "turn": 1,
+        "step": 8,
+        "chunk": {
+          "type": "block-end",
+          "index": 0,
+          "block": {
+            "type": "text",
+            "text": "ADVANCED_EXECUTABLE_OK"
+          }
+        }
+      }
+    },
+    {
+      "type": "assistant/chunk",
+      "seq": 89,
+      "time": 0,
+      "data": {
+        "turn": 1,
+        "step": 8,
+        "chunk": {
+          "type": "usage",
+          "usage": {
+            "inputTokens": 3,
+            "outputTokens": 3
+          }
+        }
+      }
+    },
+    {
+      "type": "assistant/chunk",
+      "seq": 90,
+      "time": 0,
+      "data": {
+        "turn": 1,
+        "step": 8,
+        "chunk": {
+          "type": "finish",
+          "reason": {
+            "kind": "stop"
+          }
+        }
+      }
+    },
+    {
+      "type": "assistant/message",
+      "seq": 91,
+      "time": 0,
+      "data": {
+        "turn": 1,
+        "step": 8,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "ADVANCED_EXECUTABLE_OK"
+            }
+          ],
+          "source": {
+            "kind": "model",
+            "provider": "deepseek-official",
+            "model": "smoke-model"
+          },
+          "id": "{{messageId}}"
+        },
+        "usage": {
+          "inputTokens": 3,
+          "outputTokens": 3
+        }
+      },
+      "sourceEventSeqs": [
+        86,
+        87,
+        88,
+        89,
+        90
+      ],
+      "surfaceOp": "append"
+    },
+    {
+      "type": "step/end",
+      "seq": 92,
+      "time": 0,
+      "data": {
+        "turn": 1,
+        "step": 8
+      }
+    },
+    {
       "type": "turn/end",
-      "seq": 83,
+      "seq": 93,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1657,15 +1849,15 @@
               "config": {
                 "provider": "deepseek-official",
                 "model": "smoke-model",
-                "maxTokens": 256000,
-                "reasoningEffort": "high"
+                "reasoningEffort": "high",
+                "maxTokens": 256000
               },
               "adapterDefaults": {
-                "reasoningEffort": true,
                 "maxTokens": true
               },
               "system": "{{system}}",
               "tools": [
+                "ask_user_question",
                 "cordis_define",
                 "cordis_inspect_list",
                 "cordis_inspect_query",
@@ -2208,15 +2400,15 @@
               "config": {
                 "provider": "deepseek-official",
                 "model": "smoke-model",
-                "maxTokens": 256000,
-                "reasoningEffort": "high"
+                "reasoningEffort": "high",
+                "maxTokens": 256000
               },
               "adapterDefaults": {
-                "reasoningEffort": true,
                 "maxTokens": true
               },
               "system": "{{system}}",
               "tools": [
+                "ask_user_question",
                 "cordis_define",
                 "cordis_inspect_list",
                 "cordis_inspect_query",
@@ -2906,6 +3098,7 @@
               },
               "system": "{{system}}",
               "tools": [
+                "ask_user_question",
                 "cordis_define",
                 "cordis_inspect_list",
                 "cordis_inspect_query",
@@ -3610,6 +3803,7 @@
               },
               "system": "{{system}}",
               "tools": [
+                "ask_user_question",
                 "cordis_define",
                 "cordis_inspect_list",
                 "cordis_inspect_query",
@@ -4225,15 +4419,15 @@
               "config": {
                 "provider": "deepseek-official",
                 "model": "smoke-model",
-                "maxTokens": 256000,
-                "reasoningEffort": "high"
+                "reasoningEffort": "high",
+                "maxTokens": 256000
               },
               "adapterDefaults": {
-                "reasoningEffort": true,
                 "maxTokens": true
               },
               "system": "{{system}}",
               "tools": [
+                "ask_user_question",
                 "cordis_define",
                 "cordis_inspect_list",
                 "cordis_inspect_query",
@@ -4268,7 +4462,7 @@
             "chunk": {
               "type": "block-start",
               "index": 0,
-              "blockType": "text"
+              "blockType": "tool-call"
             }
           }
         }
@@ -4286,9 +4480,11 @@
             "turn": 1,
             "step": 7,
             "chunk": {
-              "type": "text-delta",
+              "type": "tool-call-delta",
               "index": 0,
-              "text": "ADVANCED_EXECUTABLE_OK"
+              "id": "advanced-question",
+              "name": "ask_user_question",
+              "argumentsDelta": "{\"questions\": [{\"id\": \"ready\", \"question\": \"Ready to finish?\", \"header\": \"Checkpoint\", \"options\": [{\"label\": \"Yes\"}, {\"label\": \"No\"}]}]}"
             }
           }
         }
@@ -4309,8 +4505,10 @@
               "type": "block-end",
               "index": 0,
               "block": {
-                "type": "text",
-                "text": "ADVANCED_EXECUTABLE_OK"
+                "type": "tool-call",
+                "id": "advanced-question",
+                "name": "ask_user_question",
+                "arguments": "{\"questions\": [{\"id\": \"ready\", \"question\": \"Ready to finish?\", \"header\": \"Checkpoint\", \"options\": [{\"label\": \"Yes\"}, {\"label\": \"No\"}]}]}"
               }
             }
           }
@@ -4353,7 +4551,7 @@
             "chunk": {
               "type": "finish",
               "reason": {
-                "kind": "stop"
+                "kind": "tool-calls"
               }
             }
           }
@@ -4375,8 +4573,10 @@
               "role": "assistant",
               "content": [
                 {
-                  "type": "text",
-                  "text": "ADVANCED_EXECUTABLE_OK"
+                  "type": "tool-call",
+                  "id": "advanced-question",
+                  "name": "ask_user_question",
+                  "arguments": "{\"questions\": [{\"id\": \"ready\", \"question\": \"Ready to finish?\", \"header\": \"Checkpoint\", \"options\": [{\"label\": \"Yes\"}, {\"label\": \"No\"}]}]}"
                 }
               ],
               "source": {
@@ -4407,8 +4607,97 @@
       "payload": {
         "sessionId": "{{parent}}",
         "event": {
-          "type": "step/end",
+          "type": "tool/call",
           "seq": 82,
+          "time": 0,
+          "data": {
+            "turn": 1,
+            "step": 7,
+            "callId": "advanced-question",
+            "name": "ask_user_question",
+            "arguments": "{\"questions\": [{\"id\": \"ready\", \"question\": \"Ready to finish?\", \"header\": \"Checkpoint\", \"options\": [{\"label\": \"Yes\"}, {\"label\": \"No\"}]}]}"
+          }
+        }
+      }
+    },
+    {
+      "method": "interaction.requested",
+      "payload": {
+        "kind": "question",
+        "requestId": "{{requestId}}",
+        "sessionId": "{{parent}}",
+        "questions": [
+          {
+            "id": "ready",
+            "question": "Ready to finish?",
+            "header": "Checkpoint",
+            "options": [
+              {
+                "label": "Yes"
+              },
+              {
+                "label": "No"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "method": "interaction.resolved",
+      "payload": {
+        "requestId": "{{requestId}}",
+        "sessionId": "{{parent}}",
+        "outcome": "answered"
+      }
+    },
+    {
+      "method": "session.event",
+      "payload": {
+        "sessionId": "{{parent}}",
+        "event": {
+          "type": "tool/result",
+          "seq": 83,
+          "time": 0,
+          "data": {
+            "turn": 1,
+            "step": 7,
+            "message": {
+              "source": {
+                "kind": "tool",
+                "callId": "advanced-question"
+              },
+              "content": [
+                {
+                  "type": "tool-result",
+                  "toolCallId": "advanced-question",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "{\"answers\":[{\"id\":\"ready\",\"selected\":[\"Yes\"]}]}"
+                    }
+                  ],
+                  "isError": false
+                }
+              ],
+              "role": "user",
+              "id": "{{messageId}}"
+            }
+          },
+          "sourceEventSeqs": [
+            82
+          ],
+          "surfaceOp": "append"
+        }
+      }
+    },
+    {
+      "method": "session.event",
+      "payload": {
+        "sessionId": "{{parent}}",
+        "event": {
+          "type": "step/end",
+          "seq": 84,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4422,8 +4711,186 @@
       "payload": {
         "sessionId": "{{parent}}",
         "event": {
+          "type": "step/start",
+          "seq": 85,
+          "time": 0,
+          "data": {
+            "turn": 1,
+            "step": 8
+          }
+        }
+      }
+    },
+    {
+      "method": "session.event",
+      "payload": {
+        "sessionId": "{{parent}}",
+        "event": {
+          "type": "assistant/chunk",
+          "seq": 86,
+          "time": 0,
+          "data": {
+            "turn": 1,
+            "step": 8,
+            "chunk": {
+              "type": "block-start",
+              "index": 0,
+              "blockType": "text"
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session.event",
+      "payload": {
+        "sessionId": "{{parent}}",
+        "event": {
+          "type": "assistant/chunk",
+          "seq": 87,
+          "time": 0,
+          "data": {
+            "turn": 1,
+            "step": 8,
+            "chunk": {
+              "type": "text-delta",
+              "index": 0,
+              "text": "ADVANCED_EXECUTABLE_OK"
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session.event",
+      "payload": {
+        "sessionId": "{{parent}}",
+        "event": {
+          "type": "assistant/chunk",
+          "seq": 88,
+          "time": 0,
+          "data": {
+            "turn": 1,
+            "step": 8,
+            "chunk": {
+              "type": "block-end",
+              "index": 0,
+              "block": {
+                "type": "text",
+                "text": "ADVANCED_EXECUTABLE_OK"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session.event",
+      "payload": {
+        "sessionId": "{{parent}}",
+        "event": {
+          "type": "assistant/chunk",
+          "seq": 89,
+          "time": 0,
+          "data": {
+            "turn": 1,
+            "step": 8,
+            "chunk": {
+              "type": "usage",
+              "usage": {
+                "inputTokens": 3,
+                "outputTokens": 3
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session.event",
+      "payload": {
+        "sessionId": "{{parent}}",
+        "event": {
+          "type": "assistant/chunk",
+          "seq": 90,
+          "time": 0,
+          "data": {
+            "turn": 1,
+            "step": 8,
+            "chunk": {
+              "type": "finish",
+              "reason": {
+                "kind": "stop"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "session.event",
+      "payload": {
+        "sessionId": "{{parent}}",
+        "event": {
+          "type": "assistant/message",
+          "seq": 91,
+          "time": 0,
+          "data": {
+            "turn": 1,
+            "step": 8,
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ADVANCED_EXECUTABLE_OK"
+                }
+              ],
+              "source": {
+                "kind": "model",
+                "provider": "deepseek-official",
+                "model": "smoke-model"
+              },
+              "id": "{{messageId}}"
+            },
+            "usage": {
+              "inputTokens": 3,
+              "outputTokens": 3
+            }
+          },
+          "sourceEventSeqs": [
+            86,
+            87,
+            88,
+            89,
+            90
+          ],
+          "surfaceOp": "append"
+        }
+      }
+    },
+    {
+      "method": "session.event",
+      "payload": {
+        "sessionId": "{{parent}}",
+        "event": {
+          "type": "step/end",
+          "seq": 92,
+          "time": 0,
+          "data": {
+            "turn": 1,
+            "step": 8
+          }
+        }
+      }
+    },
+    {
+      "method": "session.event",
+      "payload": {
+        "sessionId": "{{parent}}",
+        "event": {
           "type": "turn/end",
-          "seq": 83,
+          "seq": 93,
           "time": 0,
           "data": {
             "turn": 1,

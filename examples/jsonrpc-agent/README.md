@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-The unattended coding-agent composition for the Python SDK's bundled JSON-RPC runtime. It intentionally loads no terminal UI, console logger, approval UI, or user-questions tool because stdout belongs to the SDK protocol and turns are driven by the SDK.
+The unattended coding-agent composition for the Python SDK's bundled JSON-RPC runtime. It intentionally loads no terminal UI or console logger because stdout belongs to the SDK protocol. Approval and user-question waits travel through correlated SDK notifications and responses.
 
 The model-facing tools are:
 
@@ -10,8 +10,9 @@ The model-facing tools are:
 - `read`, `write`, and `edit`
 - `subagent`, using one foreground in-process spawn provider
 - `todo_write`
+- `ask_user_question`, answered by the SDK client
 
-The surrounding runtime also loads JSONL session persistence and automatic context compaction. `maxTokensAsSuccess` keeps a token-limited model turn as an accepted evaluation result while preserving its `max-tokens` reason.
+The surrounding runtime also loads owner-private durable image attachments under `DSH_HOME`, JSONL session persistence, exact session-query reads and explicit resume, automatic context compaction, and the human-command registry with `/compact`; SDK command execution remains outside model-visible user messages. `maxTokensAsSuccess` keeps a token-limited model turn as an accepted evaluation result while preserving its `max-tokens` reason.
 
 ## Runtime environment
 
@@ -20,6 +21,7 @@ The surrounding runtime also loads JSONL session persistence and automatic conte
 | `DEEPSEEK_API_KEY` | Credential passed to the OpenAI-compatible host endpoint |
 | `DEEPSEEK_BASE_URL` | Host endpoint used by `dsh-llm-deepseek` |
 | `DSH_CWD` | Agent workspace for bash and filesystem tools |
+| `DSH_HOME` | Harness home containing durable owner-private image objects |
 | `DSH_CONTEXT_WINDOW` | Context capacity recorded for the `DSH_MODEL` catalog entry in the minimal variant |
 | `DSH_MAX_TOKENS_AS_SUCCESS` | `true` (default) accepts token-limited results; `false` reports them as errors |
 | `DSH_MODEL` | Default model used by `minimal.py`; `--model` takes precedence |

@@ -9,7 +9,9 @@
 
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
+import type { ImageAttachmentLimits, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SessionHistoryResult, SessionListResult } from '@deepseek-ai/dsh-sdk-protocol'
 import { HarnessClient, isRecord, SdkProtocolError } from './client.ts'
 import type { ContentBlock, DeepSeekHarnessOptions, HarnessClientOptions, HarnessNotification, RunResult } from './types.ts'
 
@@ -87,6 +89,57 @@ export class DeepSeekHarness implements AsyncDisposable {
    */
   session(sessionId?: string): HarnessSession {
     return new HarnessSession(this, sessionId ?? `session-${randomUUID().replaceAll('-', '')}`)
+  }
+
+  /**
+   * List durable and live sessions through the runtime query service.
+   * @returns live-preferred session records.
+   */
+  async listSessions(): Promise<SessionListResult> {
+    await this.start()
+    return this.clientInstance.listSessions()
+  }
+
+  /**
+   * Query deployment-resolved image upload limits.
+   * @returns active attachment admission policy.
+   */
+  async imageLimits(): Promise<ImageAttachmentLimits> {
+    await this.start()
+    return this.clientInstance.imageLimits()
+  }
+
+  /**
+   * Save one image for use in a later image content block.
+   * @param data - encoded image bytes.
+   * @param mediaType - declared media type.
+   * @param name - optional display name.
+   * @returns durable reference accepted by `run()` content blocks.
+   */
+  async saveImage(data: Uint8Array, mediaType: ImageMediaType, name?: string): Promise<ImageAttachmentRef> {
+    await this.start()
+    return this.clientInstance.saveImage(data, mediaType, name)
+  }
+
+  /**
+   * Read one complete durable history without resuming its agent.
+   * @param sessionId - logical session identity.
+   * @returns detached header and complete event log.
+   */
+  async sessionHistory(sessionId: string): Promise<SessionHistoryResult> {
+    await this.start()
+    return this.clientInstance.sessionHistory(sessionId)
+  }
+
+  /**
+   * Explicitly resume one persisted session and return its stable handle.
+   * @param sessionId - persisted session identity.
+   * @returns stable resumed session handle.
+   */
+  async resumeSession(sessionId: string): Promise<HarnessSession> {
+    await this.start()
+    await this.clientInstance.resumeSession(sessionId)
+    return this.session(sessionId)
   }
 
   /**

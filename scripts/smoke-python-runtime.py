@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
-    from deepseek_harness import RunResult
+    from deepseek_harness import Notification, RunResult
 
 
 EXPECTED_TEXT = "runtime smoke ok"
@@ -79,6 +79,10 @@ RUNTIME_CONTEXT_PREFIX = "Current runtime context"
 CUSTOM_CORDIS = """\
 - id: sdk-jsonrpc-server
   name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
+- id: user-questions
+  name: '@deepseek-ai/dsh-user-questions'
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
 - id: agent-core
   name: '@deepseek-ai/dsh-agent-spine-demo'
   config:
@@ -360,6 +364,24 @@ def advanced_tool_followup(
             raise AssertionError(f"cordis_undefine returned no removal result: {tool_text}")
         if "snapshot_double" in advertised_tool_names(body):
             raise AssertionError("snapshot_double remained advertised after cordis_undefine")
+        assert_advertised_tool(body, "ask_user_question")
+        return tool_call_chunks(
+            "advanced-question",
+            "ask_user_question",
+            {
+                "questions": [
+                    {
+                        "id": "ready",
+                        "question": "Ready to finish?",
+                        "header": "Checkpoint",
+                        "options": [{"label": "Yes"}, {"label": "No"}],
+                    }
+                ]
+            },
+        )
+    if call_id == "advanced-question" and tool_name == "ask_user_question":
+        if '"selected":["Yes"]' not in tool_text:
+            raise AssertionError(f"ask_user_question returned unexpected answer: {tool_text}")
         return text_chunks(SNAPSHOT_FINAL_TEXT)
     raise AssertionError(f"unexpected advanced tool follow-up: {call_id} {tool_name}: {tool_text}")
 
@@ -614,7 +636,40 @@ def smoke_sdk_snapshot(base_url: str, executable: Path, update_snapshots: bool) 
             base_url=base_url,
             request_timeout_seconds=60,
         ) as harness:
-            result = harness.run(SNAPSHOT_PROMPT, session_id=SNAPSHOT_SESSION_ID)
+            catalog = harness.client.list_models()
+            harness.client.select_model(
+                SNAPSHOT_SESSION_ID, "deepseek-official", "smoke-model"
+            )
+            commands = harness.client.list_commands(SNAPSHOT_SESSION_ID)
+            command = harness.client.execute_command(SNAPSHOT_SESSION_ID, "/compact")
+
+            def answer_interaction(notification: Notification) -> None:
+                payload = notification.payload
+                if (
+                    notification.method != "interaction.requested"
+                    or payload.get("kind") != "question"
+                ):
+                    return
+                receipt = harness.client.respond_question(
+                    payload["requestId"],
+                    [{"id": "ready", "selected": ["Yes"]}],
+                )
+                if not receipt.accepted:
+                    raise AssertionError(f"advanced question response was rejected: {receipt}")
+
+            result = harness.run(
+                SNAPSHOT_PROMPT,
+                session_id=SNAPSHOT_SESSION_ID,
+                on_notification=answer_interaction,
+            )
+            controls = {
+                "provider_ids": [provider.id for provider in catalog.providers],
+                "catalog_failures": [failure.id for failure in catalog.failures],
+                "commands_available": commands.available,
+                "command_outcome": command.outcome,
+                "cancel_requested": harness.client.cancel_session(SNAPSHOT_SESSION_ID),
+                "session_closed": harness.client.close_session(SNAPSHOT_SESSION_ID),
+            }
 
         assert result.final_response == SNAPSHOT_FINAL_TEXT, result.final_response
         methods = [notification.method for notification in result.notifications]
@@ -633,7 +688,7 @@ def smoke_sdk_snapshot(base_url: str, executable: Path, update_snapshots: bool) 
         if "WORKFLOW_CHILD_OK" not in render_jsonl(logs[child_ids[1]]):
             raise AssertionError("second advanced child log has no workflow-subagent result")
 
-        files = build_snapshot_files(result, logs, child_ids, root)
+        files = build_snapshot_files(result, logs, child_ids, root, controls)
         compare_snapshot_files(
             files, update_snapshots, ADVANCED_SNAPSHOT_DIRECTORY, ADVANCED_SNAPSHOT_FILENAMES,
         )
@@ -888,6 +943,7 @@ def build_snapshot_files(
     logs: dict[str, list[dict[str, object]]],
     child_ids: list[str],
     cwd: Path,
+    controls: dict[str, object],
 ) -> dict[str, str]:
     """Render the SDK result and three persisted logs into stable expected outputs."""
     replacements = [(str(cwd), "{{cwd}}"), (SNAPSHOT_SESSION_ID, "{{parent}}")]
@@ -901,6 +957,7 @@ def build_snapshot_files(
     result_value = {
         "session_id": result.session_id,
         "final_response": result.final_response,
+        "controls": controls,
         "events": result.events,
         "notifications": [
             {"method": notification.method, "payload": notification.payload}
@@ -978,6 +1035,8 @@ def normalize_snapshot_value(
         normalized["time"] = 0
     if isinstance(normalized.get("id"), str) and normalized.get("role") in ("assistant", "user"):
         normalized["id"] = "{{messageId}}"
+    if isinstance(normalized.get("requestId"), str):
+        normalized["requestId"] = "{{requestId}}"
     scrub_snapshot_header(normalized)
     return normalized
 

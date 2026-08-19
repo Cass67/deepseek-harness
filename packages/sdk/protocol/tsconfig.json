@@ -15,10 +15,19 @@
       "path": "../../../vendor/cordis"
     },
     {
+      "path": "../../attachment/attachment"
+    },
+    {
       "path": "../../llm/llm"
     },
     {
       "path": "../../core/session"
+    },
+    {
+      "path": "../../interaction/user-approval"
+    },
+    {
+      "path": "../../interaction/user-questions"
     },
     {
       "path": "../../subagent/subagent"

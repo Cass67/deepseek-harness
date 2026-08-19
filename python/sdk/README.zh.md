@@ -21,7 +21,7 @@ with DeepSeekHarness() as harness:
 
 `DeepSeekHarness` 会保留其按需启动的运行时子进程，以便在多次调用之间复用。请像上例一样将其用作上下文管理器，或在使用完毕后显式调用 `close()`。
 
-默认情况下，SDK 会启动 `deepseek-harness-runtime-bin` 包内置的单文件可执行程序 `dsh-jsonrpc-agent`，并通过 `DSH_CORDIS_CONFIG` 注入该包的默认配置，其中包括 stdio JSON-RPC 服务器、agent core（智能体核心）、预载的 DeepSeek 适配器、采用显式组合语义检查点策略的 JSONL 会话持久化，以及本地 bash。要运行自己的插件组合，请在配置中保留 `@deepseek-ai/dsh-sdk-jsonrpc-server` 配置项，并传入 Cordis 配置文件路径。
+默认情况下，SDK 会启动 `deepseek-harness-runtime-bin` 包内置的单文件可执行程序 `dsh-jsonrpc-agent`，并通过 `DSH_CORDIS_CONFIG` 注入该包的默认配置，其中包括 stdio JSON-RPC 服务器、agent core（智能体核心）、预载的 DeepSeek 适配器、位于 `DSH_HOME` 下且仅所有者可访问的本地附件存储、采用显式组合语义检查点策略的 JSONL 会话持久化，以及本地 bash。要运行自己的插件组合，请在配置中保留 `@deepseek-ai/dsh-sdk-jsonrpc-server` 配置项，并传入 Cordis 配置文件路径。
 
 ```py
 from deepseek_harness import DeepSeekHarness
@@ -41,7 +41,11 @@ with DeepSeekHarness(
 
 `Session.run()` 的活动区间从其提示词被持久 inbox 接收时开始，到整个 agent 下一次进入空闲状态时结束，并返回 `RunResult(session_id, final_response, finish_reason, events, notifications, session_root)`。`final_response` 是该区间内根会话最后提交的助手文本。`finish_reason` 是该区间内根会话最后一个 `turn/end` 的 `kind`，例如 `completed`、`max-tokens` 或 `error`；没有轮次结束时为 `None`。缺少字符串 `data.reason.kind` 的 `turn/end` 违反运行时协议，并会抛出 `SdkProtocolError`。这两个结果字段描述的是 `Session.run()` 所界定的活动区间，并不表示某项输出或结束原因在因果上归属于该提示词。steering（中途引导）、注入的上下文和其他排队工作，也可能在 agent 进入空闲状态前参与这段活动。
 
-`HarnessClient` 会在运行时进程的整个生命周期内保留已发现的 subagent 谱系。每次执行 `Session.run()` 时，`RunResult.notifications` 与 `on_notification` 会按协议传输顺序收到根会话及所有已知后代的通知，其中包括嵌套 subagent 的生命周期事件与会话事件。`RunResult.events` 只包含根会话事件，因此后代消息不会覆盖根会话回复。底层 `session_prompt()` 会立即返回已排队消息的 `MessageId`；绕过 `Session.run()` 的调用方必须自行负责后续的活动边界。
+`DeepSeekHarness.image_limits()` 返回当前图像策略，`save_image(data, media_type, name=None)` 上传编码字节并返回严格的 `ImageAttachmentRef`，供后续 `{"type": "image", "attachment": ref.model_dump(by_alias=True, exclude_none=True)}` 内容块使用。底层客户端提供相同方法；两层都会拒绝畸形引用，以及字节数或媒体类型与请求不一致的引用。图像内容还要求所选运行时 LLM 适配器和模型路由接受图像输入；仅有持久附件存储不会增加图像支持。
+
+底层 provider 原生认证与 TypeScript SDK 对等：`provider_auth_info()`、`start_provider_auth()`、`respond_provider_auth()`、`cancel_provider_auth()` 与 `logout_provider()`。Pydantic 校验全部无秘密结果形状；提交的 key/code 是只存在于请求中的值，绝不会出现在返回模型中。
+
+`HarnessClient` 会在运行时进程的整个生命周期内保留已发现的 subagent 谱系。每次执行 `Session.run()` 时，`RunResult.notifications` 与 `on_notification` 会按协议传输顺序收到根会话及所有已知后代的通知，其中包括嵌套 subagent 的生命周期事件与会话事件。`RunResult.events` 只包含根会话事件，因此后代消息不会覆盖根会话回复。底层 `session_prompt()` 会立即返回已排队消息的 `MessageId`；绕过 `Session.run()` 的调用方必须自行负责后续的活动边界。交互式客户端使用 `list_models()` 获取提供方／模型目录，使用 `list_sessions()` 与 `session_history()` 进行不附加 agent 的持久化读取，显式调用 `resume_session()` 重建持久化 agent，使用 `select_model(session_id, provider, model, reasoning_effort=None)` 选择后续 step 路由，使用 `cancel_session()` 获取不代表 idle 完成的取消回执，并使用 `close_session()` 完全停稳并释放 agent。`interaction.requested` 通知通过 `respond_approval()`、`respond_question()` 或 `cancel_question()` 回答；稳定请求 ID 与确切选项校验确保首个有效响应获胜。`list_commands()` 与 `execute_command()` 通过运行时命令注册表分派，因此 `/compact` 和插件命令不会变成模型可见用户消息。这些方法返回已导出的 Pydantic 响应模型，并拒绝非法运行时响应；目录失败按提供方保留，命令能力缺失是结构化执行结果。
 
 也可以通过 `DSH_CORDIS_CONFIG` 为运行时子进程指定配置。注入逻辑位于 `HarnessClient.start()`，因此底层客户端按默认方式启动时也具有该行为：如果启动方式最终解析为内置运行时，且既没有设置 `cordis`，也没有设置非空的 `DSH_CORDIS_CONFIG`（运行时将空值视为未设置，注入检查也是如此），系统就会使用内置默认配置；显式指定 `runtime_bin`、`bridge_bin` 或 `launch_args_override` 时，则会完全禁用该注入。运行时载体（生产用 exe 与仅限开发的 `node` 闭包）及其获取方式见 [sdk-runtime README](https://github.com/deepseek-ai/deepseek-harness/blob/master/python/sdk-runtime/README.md)。
 

@@ -83,6 +83,10 @@
 
 两个适配器使用不同内部机制实现 `LlmAdapter`：[`@deepseek-ai/dsh-llm-deepseek`](../llm-deepseek) 针对 `deepseek-official` 路由使用直接 fetch 加 `eventsource-parser` SSE（Server-Sent Events）分帧，[`@deepseek-ai/dsh-llm-pi-ai`](../llm-pi-ai) 则通过 `@earendil-works/pi-ai` 动态解析已配置提供方／模型对。两者都遵循 `types.ts` 中的 `StreamChunk` 约定：usage 先于 finish，工具参数保持原始字符串。适配器实现在内部可以抛出异常或发出失败 finish；`LlmRuntime` 会将两者都暴露为终止失败 finish。适配器理由见[双 LLM 适配器](../../../.agents/notes/implemented/architecture/2026-06-13-twin-llm-adapters.md)，服务边界见[终止失败决策](../../../.agents/notes/implemented/architecture/2026-07-29-terminal-llm-stream-failures.md)。
 
+## Provider 认证
+
+`LlmAdapter.authInfo/login/logout` 及对应 `LlmRuntime` 转发构成 provider 中立的原生认证 seam。元数据只包含方法标签、已配置类型/来源与状态。登录交互携带 text/secret/select/manual-code prompt，以及 info、认证 URL、设备码和进度事件；适配器负责协议机制，调用方负责展示与关联。适配器默认方法报告不可用，因此没有原生认证的适配器不会获得虚假控制项。
+
 ## 模型体验
 
 无。服务不添加任何与模型绑定的文本、schema 或消息；它只会填入并记录适配器配置的推理强度。

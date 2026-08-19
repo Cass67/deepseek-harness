@@ -83,6 +83,10 @@ Every adapter that puts a credential in an HTTP header judges it the same way be
 
 Two adapters implement `LlmAdapter` on different internals: [`@deepseek-ai/dsh-llm-deepseek`](../llm-deepseek) uses direct fetch with `eventsource-parser` SSE framing for the `deepseek-official` route, while [`@deepseek-ai/dsh-llm-pi-ai`](../llm-pi-ai) dynamically resolves configured provider/model pairs through `@earendil-works/pi-ai`. Both follow the `StreamChunk` conventions in `types.ts`: usage precedes finish and tool arguments remain raw strings. Adapter implementations may throw or emit a failure finish internally; `LlmRuntime` exposes both as a terminal failure finish. See [the twin LLM adapters](../../../.agents/notes/implemented/architecture/2026-06-13-twin-llm-adapters.md) for the adapter rationale and [the terminal-failure decision](../../../.agents/notes/implemented/architecture/2026-07-29-terminal-llm-stream-failures.md) for the service boundary.
 
+## Provider authentication
+
+`LlmAdapter.authInfo/login/logout` and matching `LlmRuntime` forwarding form the provider-neutral native-auth seam. Metadata contains only method labels, configured type/source, and status. Login interactions carry text/secret/select/manual-code prompts plus info, authorization-URL, device-code, and progress events; adapters own protocol mechanics and callers own presentation/correlation. Default adapter methods report unavailable, so adapters without native authentication do not gain a fake control.
+
 ## Model Experience
 
 None, as the service adds no model-bound text, schema, or message; it only materializes and logs an adapter-configured reasoning effort.

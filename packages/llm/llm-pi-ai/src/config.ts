@@ -365,6 +365,7 @@ export function resolveProfiles(
         ...source.baseURL === undefined ? {} : { baseURL: source.baseURL },
         models: catalog.models,
         namesCredential: apiKeyEnv !== undefined,
+        hasRequestHeaders: Object.keys(source.headers ?? {}).length > 0,
       }),
     })
   }

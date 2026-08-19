@@ -148,6 +148,51 @@ export interface LlmProviderInfo {
   name: string
 }
 
+/** Provider-native authentication method offered by one route. */
+export interface LlmProviderAuthMethod {
+  type: 'api_key' | 'oauth'
+  label: string
+}
+
+/** Non-secret authentication state for one route. */
+export interface LlmProviderAuthInfo {
+  provider: string
+  methods: readonly LlmProviderAuthMethod[]
+  configured: boolean
+  credentialType?: 'api_key' | 'oauth'
+  source?: string
+}
+
+/** One provider-native login prompt. */
+export type LlmAuthPrompt =
+  | { type: 'text' | 'secret' | 'manual_code'; message: string; placeholder?: string; signal?: AbortSignal }
+  | {
+    type: 'select'
+    message: string
+    options: readonly { id: string; label: string; description?: string }[]
+    signal?: AbortSignal
+  }
+
+/** Non-secret progress emitted during provider-native login. */
+export type LlmAuthEvent =
+  | { type: 'info'; message: string; links?: readonly { url: string; label?: string }[] }
+  | { type: 'auth_url'; url: string; instructions?: string }
+  | {
+    type: 'device_code'
+    userCode: string
+    verificationUri: string
+    intervalSeconds?: number
+    expiresInSeconds?: number
+  }
+  | { type: 'progress'; message: string }
+
+/** Interaction callbacks used by adapter-owned authentication. */
+export interface LlmAuthInteraction {
+  signal?: AbortSignal
+  prompt(prompt: LlmAuthPrompt): Promise<string>
+  notify(event: LlmAuthEvent): void
+}
+
 /** Merge-extensible provider model modality vocabulary. */
 export interface ModelModalityMap {
   text: 'text'

@@ -229,6 +229,24 @@ describe('DeepSeekHarness', () => {
     await expect(harness.run('bad')).rejects.toThrow(SdkProtocolError)
   })
 
+  it('uploads durable images through high-level attachment APIs', async () => {
+    const harness = harnessWith()
+    await expect(harness.imageLimits()).resolves.toMatchObject({
+      maxImageBytes: 1024,
+      mediaTypes: ['image/png', 'image/jpeg'],
+    })
+    await expect(harness.saveImage(Uint8Array.of(1, 2, 3), 'image/png', 'pixel.png'))
+      .resolves.toEqual({
+        attachmentId: 'fake:attachment-1',
+        mediaType: 'image/png',
+        bytes: 3,
+        width: 1,
+        height: 1,
+        name: 'pixel.png',
+      })
+    await expect(harness.saveImage(Uint8Array.of(4), 'image/png')).resolves.not.toHaveProperty('name')
+  })
+
   it('supports await using disposal', async () => {
     let captured: DeepSeekHarness
     {
@@ -243,6 +261,163 @@ describe('DeepSeekHarness', () => {
 })
 
 describe('HarnessClient', () => {
+  it('projects every interactive control method with validated typed results', async () => {
+    const client = new HarnessClient(fakeLaunch())
+    cleanups.push(() => client.close())
+
+    await expect(client.catalog()).resolves.toEqual({
+      providers: [{ id: 'fake', name: 'Fake Provider', models: [{
+        id: 'fake-model',
+        name: 'Fake Model',
+        inputModalities: ['text'],
+        reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'high' },
+      }] }],
+      failures: [{ id: 'offline', name: 'Offline', message: 'offline' }],
+    })
+    await expect(client.providerAuthInfo('fake')).resolves.toEqual({
+      provider: 'fake',
+      methods: [{ type: 'api_key', label: 'API key' }, { type: 'oauth', label: 'Subscription login' }],
+      configured: false,
+    })
+    const authNotifications = client.subscribe(notification => notification.method.startsWith('provider.auth.'))
+    const auth = await client.startProviderAuth('fake', 'api_key')
+    const prompt = await authNotifications.next()
+    expect(prompt).toMatchObject({ method: 'provider.auth.prompt', params: { flowId: auth.flowId, promptId: 'auth-prompt' } })
+    await expect(client.respondProviderAuth(auth.flowId, 'auth-prompt', 'never-echo-this')).resolves.toEqual({ accepted: true })
+    expect(JSON.stringify(await authNotifications.next())).not.toContain('never-echo-this')
+    expect(JSON.stringify(await authNotifications.next())).not.toContain('never-echo-this')
+    authNotifications.close()
+    await expect(client.cancelProviderAuth('auth-flow')).resolves.toEqual({ requested: true })
+    await expect(client.logoutProvider('fake')).resolves.toEqual({ disconnected: true })
+    await expect(client.imageLimits()).resolves.toEqual({
+      maxImageBytes: 1024,
+      maxImagesPerMessage: 4,
+      maxMessageImageBytes: 4096,
+      maxImagePixels: 1_000_000,
+      mediaTypes: ['image/png', 'image/jpeg'],
+    })
+    await expect(client.saveImage(Uint8Array.of(1, 2), 'image/png')).resolves.toMatchObject({
+      attachmentId: 'fake:attachment-1', mediaType: 'image/png', bytes: 2,
+    })
+    await expect(client.listSessions()).resolves.toEqual({
+      sessions: [{
+        header: { version: 0, id: 'saved', createdAt: 7, cwd: '/tmp' }, live: false, persisted: true,
+      }],
+    })
+    await expect(client.sessionHistory('saved')).resolves.toEqual({
+      session: { version: 0, id: 'saved', createdAt: 7, cwd: '/tmp' },
+      events: [{ type: 'turn/start', seq: 0, time: 8, data: { turn: 1 } }],
+    })
+    await expect(client.resumeSession('saved')).resolves.toEqual({ sessionId: 'saved' })
+    await expect(client.respondApproval('approval-1', 'allowed-once')).resolves.toEqual({ accepted: true })
+    await expect(client.respondQuestion('question-1', { answers: [{ id: 'q', selected: ['yes'] }] }))
+      .resolves.toEqual({ accepted: true })
+    await expect(client.cancelQuestion('question-2')).resolves.toEqual({ accepted: true })
+    await expect(client.selectModel('main', 'fake', 'fake-model', 'high')).resolves.toEqual({
+      provider: 'fake', model: 'fake-model', reasoningEffort: 'high',
+    })
+    await expect(client.cancelSession('main')).resolves.toBe(true)
+    await expect(client.closeSession('main')).resolves.toBe(true)
+    await expect(client.listCommands('main')).resolves.toEqual({
+      available: true,
+      commands: [{ name: 'compact', description: 'Compact context', input: { hint: 'instructions' } }],
+    })
+    await expect(client.executeCommand('main', '/compact')).resolves.toEqual({
+      outcome: 'success', commandId: 'cmd-fake-1', text: 'done',
+    })
+  })
+
+  it('validates optional session headers and exact contiguous history', async () => {
+    const client = new HarnessClient(fakeLaunch({ FAKE_OPTIONAL_SESSION_HEADER: '1' }))
+    cleanups.push(() => client.close())
+
+    await expect(client.sessionHistory('saved')).resolves.toMatchObject({
+      session: {
+        id: 'saved',
+        parentSession: 'parent',
+        seedLength: 0,
+        origin: 'subagent',
+        delegationDepth: 1,
+        agentPreset: 'worker',
+      },
+      events: [{ type: 'turn/start', seq: 0, data: { turn: 1 } }],
+    })
+  })
+
+  it.each([
+    ['malformed event payload', { FAKE_MALFORMED_HISTORY: '1' }, (client: HarnessClient) => client.sessionHistory('saved')],
+    ['malformed event type', { FAKE_MALFORMED_HISTORY_TYPE: '1' }, (client: HarnessClient) => client.sessionHistory('saved')],
+    ['gapped event sequence', { FAKE_GAPPED_HISTORY: '1' }, (client: HarnessClient) => client.sessionHistory('saved')],
+    ['duplicate event sequence', { FAKE_DUPLICATE_HISTORY: '1' }, (client: HarnessClient) => client.sessionHistory('saved')],
+    ['mismatched resume identity', { FAKE_MISMATCH_RESUME: '1' }, (client: HarnessClient) => client.resumeSession('saved')],
+  ] as const)('rejects %s', async (_name, environment, operation) => {
+    const client = new HarnessClient(fakeLaunch(environment))
+    cleanups.push(() => client.close())
+    await expect(operation(client)).rejects.toBeInstanceOf(SdkProtocolError)
+  })
+
+  it('rejects malformed or request-mismatched attachment responses', async () => {
+    const client = new HarnessClient(fakeLaunch({ FAKE_MALFORMED_ATTACHMENTS: '1' }))
+    cleanups.push(() => client.close())
+    await expect(client.imageLimits()).rejects.toBeInstanceOf(SdkProtocolError)
+    await expect(client.saveImage(Uint8Array.of(1, 2), 'image/png'))
+      .rejects.toBeInstanceOf(SdkProtocolError)
+
+    const mismatch = new HarnessClient(fakeLaunch({ FAKE_MISMATCH_ATTACHMENT: '1' }))
+    cleanups.push(() => mismatch.close())
+    await expect(mismatch.saveImage(Uint8Array.of(1, 2), 'image/png'))
+      .rejects.toBeInstanceOf(SdkProtocolError)
+  })
+
+  it('rejects malformed catalog reasoning metadata', async () => {
+    const client = new HarnessClient(fakeLaunch({ FAKE_MALFORMED_REASONING: '1' }))
+    cleanups.push(() => client.close())
+    await expect(client.catalog()).rejects.toBeInstanceOf(SdkProtocolError)
+  })
+
+  it('rejects malformed interactive control responses', async () => {
+    const calls: ((client: HarnessClient) => Promise<unknown>)[] = [
+      client => client.catalog(),
+      client => client.selectModel('main', 'fake', 'model'),
+      client => client.cancelSession('main'),
+      client => client.closeSession('main'),
+      client => client.listCommands('main'),
+      client => client.executeCommand('main', '/compact'),
+    ]
+    for (const call of calls) {
+      const client = new HarnessClient(fakeLaunch({ FAKE_MALFORMED_CONTROLS: '1' }))
+      cleanups.push(() => client.close())
+      await expect(call(client)).rejects.toBeInstanceOf(SdkProtocolError)
+      await client.close()
+    }
+  })
+
+  it('rejects malformed provider auth results and notifications', async () => {
+    const malformedInfo = new HarnessClient(fakeLaunch({ FAKE_MALFORMED_AUTH: '1' }))
+    cleanups.push(() => malformedInfo.close())
+    await expect(malformedInfo.providerAuthInfo('fake')).rejects.toBeInstanceOf(SdkProtocolError)
+    await malformedInfo.close()
+
+    const malformedNotification = new HarnessClient(fakeLaunch({ FAKE_MALFORMED_AUTH: '1' }))
+    cleanups.push(() => malformedNotification.close())
+    const subscription = malformedNotification.subscribe(notification => notification.method.startsWith('provider.auth.'))
+    await malformedNotification.startProviderAuth('fake', 'api_key')
+    await expect(subscription.next()).rejects.toBeInstanceOf(SdkProtocolError)
+
+    const malformedResults: ((client: HarnessClient) => Promise<unknown>)[] = [
+      client => client.startProviderAuth('fake', 'api_key'),
+      client => client.respondProviderAuth('flow', 'prompt', 'secret'),
+      client => client.cancelProviderAuth('flow'),
+      client => client.logoutProvider('fake'),
+    ]
+    for (const call of malformedResults) {
+      const client = new HarnessClient(fakeLaunch({ FAKE_MALFORMED_AUTH_RESULTS: '1' }))
+      cleanups.push(() => client.close())
+      await expect(call(client)).rejects.toBeInstanceOf(SdkProtocolError)
+      await client.close()
+    }
+  })
+
   it('times out a hung request at the per-call bound', async () => {
     const client = new HarnessClient(fakeLaunch({ FAKE_HANG_PROMPT: '1' }))
     cleanups.push(() => client.close())
