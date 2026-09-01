@@ -41,6 +41,22 @@ interface PackageManifest {
   bin?: unknown
 }
 
+/**
+ * Interpreter for the dsh runtime subprocess: always a real Node executable.
+ * `process.execPath` is the caller's interpreter, which may be Bun; Bun's
+ * transpiler cannot safely load every harness plugin source, so the runtime
+ * must never inherit it. `DSH_RUNTIME_NODE` forces the binary.
+ */
+function runtimeCommand(): string {
+  const forced = process.env.DSH_RUNTIME_NODE
+  if (forced) return forced
+  const exec = process.execPath
+  if (exec.endsWith('bun') || exec.endsWith('bun.exe')) {
+    return process.env.npm_node_execPath ?? 'node'
+  }
+  return exec
+}
+
 /** Read a package manifest from one resolved package.json URL. */
 function manifest(url: string): PackageManifest {
   return JSON.parse(readFileSync(fileURLToPath(url), 'utf8')) as PackageManifest
@@ -139,7 +155,7 @@ export function resolveDshLaunch(
   ]
   const dshHome = options.dshHome === undefined ? undefined : resolve(callerCwd, options.dshHome)
   return {
-    command: process.execPath,
+    command: runtimeCommand(),
     args: [...dshLaunch.nodeArgs, '--profile', profile, ...patches.flatMap(path => ['--patch', path])],
     ...options.processCwd === undefined ? {} : { cwd: resolve(callerCwd, options.processCwd) },
     environment: () => ({
