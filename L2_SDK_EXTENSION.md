@@ -26,7 +26,7 @@ The two fork commits together:
 
 | Commit       | Subject                                                                      | What it lays down                                                                                                                                                                                                                                                                                                 |
 | ------------ | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `f2ffab2f83` | `feat(sdk): durable image attachments, interactive session controls, resume` | Shared ground: provider-neutral auth vocabulary in `dsh-llm`, the pi-ai durable credential store + adapter auth/image support, low-level `dsh-sdk-client` request plumbing, protocol structure, JSON-RPC runtime snapshot, Python SDK/runtime, the `jsonrpc-agent` example + snapshots, and the four Agent Notes. |
+| `f2ffab2f83` | `feat(sdk): durable image attachments, interactive session controls, resume` | Shared ground: provider-neutral auth vocabulary in `dsh-llm`, adapter auth/image support (since the upstream merge, the pi-ai auth rides upstream's credentials-plane seam `auth.ts`/`login.ts` instead of the fork's original `auth-store.ts`), low-level `dsh-sdk-client` request plumbing, protocol structure, JSON-RPC runtime snapshot, Python SDK/runtime, the `jsonrpc-agent` example + snapshots, and the four Agent Notes. |
 | `f5afaacf40` | `feat(sdk): L2 runtime methods for settings, skills and agent presets`       | The concrete method implementations: `packages/sdk/server/src/server.ts` dispatch (+1029 lines) and the high-level TypeScript `client.ts` / protocol `types.ts` / `index.ts`.                                                                                                                                     |
 
 Apply them in that order (`f2ffab2f83`, then `f5afaacf40`); the second is a
@@ -91,7 +91,7 @@ provider/authStart  provider/authInfo  provider/authRespond  provider/authCancel
 | Interactions  | `interaction/respond`                                                                                         | Answer approval requests and user questions (`ApprovalModal`, `InteractionOverlay`), first-response-wins.                                                                                  |
 | Catalog       | `llm/catalog`                                                                                                 | List every registered provider + resolve each model's modality/metadata/reasoning for the `Ctrl+L` picker.                                                                                 |
 | Attachments   | `attachment/imageLimits`, `attachment/saveImage`                                                              | Query the active image policy and publish one canonical-base64 image to the durable store, returning an opaque `ImageAttachmentRef`.                                                       |
-| Provider auth | `provider/authStart`, `authInfo`, `authRespond`, `authCancel`, `authLogout`                                   | Non-secret provider-native authentication (API-key masked entry, OAuth/device/manual-code flows) owned by the adapter, `$DSH_HOME`-durable credential store.                               |
+| Provider auth | `provider/authStart`, `authInfo`, `authRespond`, `authCancel`, `authLogout`                                   | Non-secret provider-native authentication (API-key masked entry, OAuth/device/manual-code flows) owned by the adapter; credentials persist through the harness credential plane (`ctx.credentials`) and its authorization flows.                               |
 
 ## Key contracts
 
@@ -157,10 +157,11 @@ Agent Notes under `.agents/notes/implemented/feature/2026-08-1[7-8]-*.md`):
 - `packages/llm/llm/` — `types.ts`, `index.ts`: provider-neutral **auth
   vocabulary** (non-secret method/status, text/secret/select/manual-code
   prompts, progress + authorization events, login, logout)
-- `packages/llm/llm-pi-ai/` — **`auth-store.ts`** (new durable credential
-  store: `0700/0600`, cross-process atomic read-modify-write), `adapter.ts`
-  (auth delegation + attachment resolution + native image conversion),
-  `provider.ts`, `config.ts`, `index.ts`, tests
+- `packages/llm/llm-pi-ai/` — `adapter.ts` (auth delegation + attachment
+  resolution + native image conversion), `provider.ts`, `config.ts`, `index.ts`,
+  tests. On the merged tree the durable store is upstream's `auth.ts`
+  (`credentialStoreFrom`/`authContextFrom`) and `login.ts`
+  (`registerPiAiFlows`); the fork's original `auth-store.ts` is deleted.
 - `packages/skill/`, the `jsonrpc-agent` example (`cordis.yml` variants +
   snapshots), the Python SDK (`python/sdk`) and runtime
   (`python/sdk-runtime`), regenerated docs, and the four Agent Notes.
@@ -183,8 +184,10 @@ Without these, parts of the surface are absent or fail loud (by design):
   `DSH_HOME`, never the workspace/session dir). Absence makes
   `saveImage`/`imageLimits` fail with an explicit capability-absence error.
 - **Provider auth**: requires the pi-ai adapter to implement the LLM auth
-  vocabulary and to wire `PiAiCredentialStore` into its `Models` snapshot
-  (`credentials: authStore`).
+  vocabulary and the harness credential plane: on the merged tree the
+  adapter's `createModels` receives upstream's `{ credentials, authContext }`
+  injection from `credentialStoreFrom(ctx)`/`authContextFrom(ctx)`, and
+  `registerPiAiFlows` offers the login surfaces.
 - **Commands**: optional `ctx.commands`; absence returns a structured
   capability-unavailable outcome rather than failing the wire.
 

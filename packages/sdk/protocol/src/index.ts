@@ -51,6 +51,8 @@ export type {
   ProviderAuthRespondResult,
   ProviderAuthStartParams,
   ProviderAuthStartResult,
+  SdkEncodedImageBlock,
+  SdkPromptContentBlock,
   SdkRunStatus,
   SessionCancelResult,
   SessionCloseResult,

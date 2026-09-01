@@ -27,6 +27,9 @@
       "path": "../../core/agent"
     },
     {
+      "path": "../../attachment/attachment"
+    },
+    {
       "path": "../../core/session"
     },
     {

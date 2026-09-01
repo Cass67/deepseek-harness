@@ -57,18 +57,20 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
-import { assertUsableApiKey, LlmError } from '@deepseek-ai/dsh-llm'
+import { assertUsableApiKey, LlmError, resolveImageAttachmentAccess } from '@deepseek-ai/dsh-llm'
 import type { AdapterRegistrationHandle, DirectoryRegistrationHandle, LlmConfigurableProvider } from '@deepseek-ai/dsh-llm'
-import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type {} from '@deepseek-ai/dsh-fs'
+import type {} from '@deepseek-ai/dsh-settings'
+import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
 import { PiAiAdapter } from './adapter.ts'
+import { authContextFrom, credentialStoreFrom } from './auth.ts'
 import { catalogProviderIds } from './catalog.ts'
 import { assertServiceable, Config, resolveProfiles } from './config.ts'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { discoverModels } from './discovery.ts'
-import { PiAiCredentialStore, resolvePiAiAuthPath } from './auth-store.ts'
+import { registerPiAiFlows } from './login.ts'
 
 export { PiAiAdapter } from './adapter.ts'
-export { PiAiCredentialStore, resolvePiAiAuthPath } from './auth-store.ts'
 export type { PiAiAdapterOptions } from './adapter.ts'
 export { Config } from './config.ts'
 export type {
@@ -81,12 +83,13 @@ export type {
   PiAiThinkingFormat,
   ResolvedPiAiProviderProfile,
 } from './config.ts'
+export { recordKeyFor } from './auth.ts'
 export { supportedProtocols } from './provider.ts'
 
 export const name = 'llm-pi-ai'
 export const inject = ['llm']
 
-const NS = settingsNamespace('llm-pi-ai')
+const NS = 'llm-pi-ai'
 
 /**
  * The registry captures these per route; a change here must re-register.
@@ -107,15 +110,10 @@ function registrationFacts(profiles: ReadonlyMap<string, ResolvedPiAiProviderPro
 }
 
 /**
- * The configurable-provider directory: every installed catalog route this
- * adapter can authenticate, plus every route the current profiles declare. A
- * hand-declared route has no catalog entry, so without this union it would
- * have no settings address and configuration surfaces could neither show nor
- * edit it.
- *
- * The profile half is unconditional, which is what keeps a route already
- * stored against a withheld provider editable and deletable rather than
- * stranded in the settings document with nothing on the page to remove it.
+ * The configurable-provider directory: every installed catalog route, plus
+ * every route the current profiles declare. A hand-declared route has no
+ * catalog entry, so without this union it would have no settings address and
+ * configuration surfaces could neither show nor edit it.
  * @param profiles - the currently resolved provider profiles.
  * @returns the directory entries in catalog order, declared routes last.
  */
@@ -195,15 +193,20 @@ export function apply(ctx: Context, config: Config): void {
     )
   }
 
-  const environment = launchEnvironmentOf(ctx)
-  const authPath = resolvePiAiAuthPath(name => environment.get(name)?.value)
-  const authStore = new PiAiCredentialStore(authPath)
-
+  // One store and one ambient context for the whole plugin instance: both read
+  // through `ctx` per call, so they stay correct across the collection rebuilds
+  // a configuration change causes, and a sign-in survives one.
+  const auth = { credentials: credentialStoreFrom(ctx), authContext: authContextFrom(ctx) }
   const adapter = new PiAiAdapter({
     profiles,
-    credentials: authStore,
     resolveApiKey,
+    auth,
     resolveAttachments: () => ctx.get('attachments'),
+    resolveImageAccess: (attachments, ref) => resolveImageAttachmentAccess(
+      attachments,
+      hostPath => ctx.get('fs')?.processPathFromHostPath(hostPath),
+      ref,
+    ),
     onReplayDegrade: ({ provider, model, reason }) => {
       ctx.logger.warn(
         `llm-pi-ai: unusable replay state on assistant history for route "${provider}/${model}";`
@@ -211,6 +214,12 @@ export function apply(ctx: Context, config: Config): void {
       )
     },
   })
+  // Independent of the route set: signing in is what makes a route worth
+  // adding, so the flows are offered before any profile names their provider.
+  // Scoped to the authorization seam rather than injected outright, because a
+  // composition without it (headless, ACP) simply has no surface to sign in
+  // from, while everything else this plugin does still works.
+  ctx.inject(['authorization'], (authorized) => { registerPiAiFlows(authorized, auth) })
   // The full installed catalog is configurable from the moment the plugin
   // mounts — dormant or not — so configuration surfaces can offer every
   // pi-ai provider before any route exists. Hand-declared routes join it as
@@ -252,7 +261,10 @@ export function apply(ctx: Context, config: Config): void {
   // except the credential: a configuration surface edits a redacted descriptor
   // and never holds a stored secret, so an already-configured route supplies
   // its own here rather than being interrogated unauthenticated.
-  ctx.llm.registerModelDiscovery(NS, request => discoverModels(request, () => storedApiKey(request.provider)))
+  ctx.llm.registerModelDiscovery(NS, (request, signal) => discoverModels(
+    { ...request, ...signal === undefined ? {} : { signal } },
+    () => storedApiKey(request.provider),
+  ))
   // Route effects bind to this apply fiber via the stable `ctx` reference,
   // even when a swap runs inside the scoped settings callback below. A bare
   // mount (zero routes) is the dormant posture: nothing registers until a
@@ -284,38 +296,40 @@ export function apply(ctx: Context, config: Config): void {
   }
   ensureRegistrationFacts()
 
-  installSettingsSection(ctx, NS, Config, config, {
-    // Refuse an unserviceable section where it is written: without this a
-    // schema-valid profile the adapter cannot serve would be stored and then
-    // silently disable every route in this namespace.
-    validate: assertServiceable,
-    setSource: (source) => {
-      current = source
-    },
-    onChange: () => {
-      // Named here rather than left to the settings watcher: `assertServiceable`
-      // cannot see the llm registry, so a profile claiming a route another
-      // adapter family owns is stored successfully and only fails at this swap.
-      // Without its own diagnostic that refusal reaches the operator as a
-      // generic "settings: watcher failed", naming neither the route nor why it
-      // is not serving. The previous routes keep serving either way.
-      try {
-        ensureRegistrationFacts()
-      } catch (error) {
-        ctx.logger.error('llm-pi-ai: keeping the previously registered routes after a refused update')
-        ctx.logger.error(error)
-      }
-      // The directory follows the profiles the registry accepted, so a route
-      // that failed to register is not advertised as configurable. A refused
-      // directory swap is contained here for the same reason the registry's
-      // is: the previous entries keep serving, and `directoryFacts` stays put
-      // so returning to a working configuration re-applies.
-      try {
-        ensureDirectory()
-      } catch (error) {
-        ctx.logger.error('llm-pi-ai: keeping the previous configurable-provider directory after a refused update')
-        ctx.logger.error(error)
-      }
-    },
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.installSection(ctx, NS, Config, config, {
+      // Refuse an unserviceable section where it is written: without this a
+      // schema-valid profile the adapter cannot serve would be stored and then
+      // silently disable every route in this namespace.
+      validate: assertServiceable,
+      setSource: (source) => {
+        current = source
+      },
+      onChange: () => {
+        // Named here rather than left to the settings watcher: `assertServiceable`
+        // cannot see the llm registry, so a profile claiming a route another
+        // adapter family owns is stored successfully and only fails at this swap.
+        // Without its own diagnostic that refusal reaches the operator as a
+        // generic "settings: watcher failed", naming neither the route nor why it
+        // is not serving. The previous routes keep serving either way.
+        try {
+          ensureRegistrationFacts()
+        } catch (error) {
+          ctx.logger.error('llm-pi-ai: keeping the previously registered routes after a refused update')
+          ctx.logger.error(error)
+        }
+        // The directory follows the profiles the registry accepted, so a route
+        // that failed to register is not advertised as configurable. A refused
+        // directory swap is contained here for the same reason the registry's
+        // is: the previous entries keep serving, and `directoryFacts` stays put
+        // so returning to a working configuration re-applies.
+        try {
+          ensureDirectory()
+        } catch (error) {
+          ctx.logger.error('llm-pi-ai: keeping the previous configurable-provider directory after a refused update')
+          ctx.logger.error(error)
+        }
+      },
+    })
   })
 }

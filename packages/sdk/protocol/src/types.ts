@@ -15,6 +15,7 @@ import type {
   LlmProviderAuthInfo,
   LlmProviderAuthMethod,
   ModelModality,
+  ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionHeader, SurfaceOp } from '@deepseek-ai/dsh-session'
 import type { SubagentStopReason } from '@deepseek-ai/dsh-subagent'
@@ -29,6 +30,8 @@ export interface InitializeParams {
   provider: string
   /** Model name every SDK-created agent runs on (the server may mount a fallback adapter; see `HarnessSdkJsonRpcServer.initialize`). */
   model: string
+  /** Optional adapter-owned reasoning effort for the selected provider/model route. */
+  reasoningEffort?: ReasoningEffortId
   /** Optional positive output-token cap inherited by SDK-created agents and their in-process descendants. */
   maxTokens?: number
 }
@@ -60,8 +63,20 @@ export interface SessionPromptParams {
   /** The SDK-side session id; an unknown id lazily creates the agent+session pair. */
   sessionId: string
   /** The prompt content blocks, sent verbatim as the user message. */
-  contentBlocks: ContentBlock[]
+  contentBlocks: SdkPromptContentBlock[]
 }
+
+/** Inline raster input admitted into the runtime's durable attachment store. */
+export interface SdkEncodedImageBlock {
+  type: 'image'
+  /** Canonical base64-encoded raster bytes. */
+  data: string
+  /** Declared raster MIME type, verified during admission. */
+  mimeType: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
+}
+
+/** SDK prompt input: ordinary durable blocks plus inline images awaiting admission. */
+export type SdkPromptContentBlock = ContentBlock | SdkEncodedImageBlock
 
 /** Durable enqueue receipt for one prompt. */
 export interface SessionPromptResult {
