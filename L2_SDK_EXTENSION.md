@@ -212,8 +212,10 @@ Rebase/apply both commits onto the target `packages/sdk` tree in order. The
 pair merges cleanly onto `dsh-v0.1.0-rc.8` (they are exactly what the
 `Cass67` fork carries on top of it); expect to re-resolve the `sdk/server`
 README prose and the `initialize` readiness boundary if upstream has since
-touched that method. The fork publishes the combined state as the
-`v0.1.0-rc.8-l2` tag, which `deepseek-tui` pins by default.
+touched that method. The fork now tracks upstream `master`
+(`dsh-v0.1.2-alpha.3`) with the L2 surface merged on top, and `deepseek-tui`
+boots that merged tree via `dsh --profile sdk` with its `cordis.yml` as a
+`--patch` overlay — the `v0.1.0-rc.8-l2` tag is retired.
 
 If only part of the surface is wanted, the two commits are grouped to allow
 the LLM-auth/attachment ground (f2ffab2f83) to be reviewed, split, or dropped
